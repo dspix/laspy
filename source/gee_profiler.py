@@ -1,4 +1,5 @@
 import pandas as pd
+import ee
 
 class Profiler():
   """Super/Parent class for time-series profiling using Google
@@ -136,7 +137,7 @@ class Mod13Q1_profiler(Profiler):
     return profile_func
 
   def to_df(self, response):
-    '''Overridden'''
+    """Overridden"""
     data = self.expand_to_df(response['features'])
     data['date'] = pd.to_datetime(data['date'])
     data.set_index('date', inplace=True)
