@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 
-def get_greenup(x_time, period=[0, 366]):
+def get_greenup(x_time, period=[0, 366], norm=False):
   """Returns index of greenup phenological date from 
   multiyear time-series profile.
 
@@ -20,8 +20,9 @@ def get_greenup(x_time, period=[0, 366]):
   x.sort_index(inplace=True)
   x['year'] = x.index.year
   
-  grad = np.gradient(x['value'].values)
-  x['curve'] = np.gradient(grad)*(1 + grad**2)**-1.5
+  x['grad'] = np.gradient(x['value'].values)
+  x['grad2'] = np.gradient(x['grad'])
+  x['curve'] =  x.eval('grad2 * (1 + grad**2)**-1.5')
 
   t, f = period
   if t<f:

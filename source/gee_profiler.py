@@ -208,3 +208,46 @@ class Mod09ga_profiler(Profiler):
     
     return data
 
+class S2_sr_profiler(Profiler):
+
+  def __init__(self, scale=10):
+    super().__init__('COPERNICUS/S2_SR', scale)
+
+  def get_profile(self, pnt):
+    def profile_func(image):
+      ndvi = image.normalizedDifference(['B8', 'B4'])
+      reduced = ndvi.reduceRegion(ee.Reducer.mean(), pnt, self.scale)
+      feat = ee.Feature(pnt, {
+          'ndvi': reduced.get('nd'),
+          'date': ee.Date(image.get('system:time_start')).format('YYYY-MM-dd')
+          })
+      return feat
+
+    return profile_func
+
+class S1_grd_profiler(Profiler):
+
+  def __init__(self, scale=10):
+    super().__init__('COPERNICUS/S1_GRD', scale)
+
+    collection = (
+        self.collection
+        .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+        .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+        #.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'))
+        .filter(ee.Filter.eq('instrumentMode', 'IW'))
+    )
+    self.collection = collection
+
+  def get_profile(self, pnt):
+    def profile_func(image):
+      bs = image.select(['VV', 'VH'])
+      reduced = bs.reduceRegion(ee.Reducer.mean(), pnt, self.scale)
+      feat = ee.Feature(pnt, {
+          'vv': reduced.get('VV'),
+          'vh': reduced.get('VH'),
+          'date': ee.Date(image.get('system:time_start')).format('YYYY-MM-dd')
+          })
+      return feat
+
+    return profile_func
