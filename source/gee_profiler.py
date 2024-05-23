@@ -217,7 +217,7 @@ class S2_cloud_profiler(Profiler):
       reduced = image.reduceRegion(ee.Reducer.mean(), pnt, self.scale)
       feat = ee.Feature(pnt, {
           'cs': reduced.get('cs'),
-          'cs_cdf': reduced.get('cs_cfd'),
+          'cs_cdf': reduced.get('cs_cdf'),
           'date': ee.Date(image.get('system:time_start')).format('YYYY-MM-dd')
           })
       return feat
