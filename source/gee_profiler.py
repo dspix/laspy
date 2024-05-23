@@ -211,7 +211,7 @@ class Mod09ga_profiler(Profiler):
 class S2_sr_profiler(Profiler):
 
   def __init__(self, scale=10):
-    super().__init__('COPERNICUS/S2_SR', scale)
+    super().__init__('COPERNICUS/S2_SR_HARMONIZED', scale)
 
   def get_profile(self, pnt):
     def profile_func(image):
