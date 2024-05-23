@@ -207,7 +207,23 @@ class Mod09ga_profiler(Profiler):
       data[param] = data['state_1km'].str[f:t].map(lu)
     
     return data
+  
+class S2_cloud_profiler(Profiler):
+  def __init__(self, scale=10):
+    super().__init__('GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED', scale)
 
+  def get_profile(self, pnt):
+    def profile_func(image):
+      reduced = image.reduceRegion(ee.Reducer.mean(), pnt, self.scale)
+      feat = ee.Feature(pnt, {
+          'cs': reduced.get('cs'),
+          'cs_cdf': reduced.get('cs_cfd'),
+          'date': ee.Date(image.get('system:time_start')).format('YYYY-MM-dd')
+          })
+      return feat
+
+    return profile_func
+  
 class S2_sr_profiler(Profiler):
 
   def __init__(self, scale=10):
