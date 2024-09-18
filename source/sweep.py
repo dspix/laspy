@@ -8,7 +8,7 @@ from dateutil.relativedelta import relativedelta
 import matplotlib
 matplotlib.rc('font', size=14)
 import matplotlib.pyplot as plt
-
+from joblib import Parallel, delayed
 
 from scipy import stats
 from tqdm import tqdm
@@ -185,151 +185,140 @@ def extract_ind(results_mat):
     df = pd.DataFrame({'mean_i': row_out, 'range_i': col_out})   
     return df
 
-def sweep_locate(x, win_mean, win_range, win_time, u_bound, l_bound, wavelet, min_thresh, win_length, fs):
-
-    i = 0
-    j = 0
-    t = 0
-    
-    results_mat = np.full((len(win_mean), len(win_range), len(win_time)), np.nan)
-    mean_err_mat = np.full((len(win_mean), len(win_range), len(win_time)), np.nan)
-    
-    #x = x.values.ravel()
+def sweep_locate(x, win_mean, win_range, wavelet, fs, l_period, u_period, min_thresh, sig_wp, cost):
     x_trim = x.copy()
     x_trim[x_trim < min_thresh] = np.nan
-    
-    for t in tqdm(range(results_mat.shape[2])):
-        t0 = win_time[t] - np.floor(win_length/2)
-        t1 = win_time[t] + np.floor(win_length/2)
 
-        if t0 < 0:
-            t0 = 0
-        if t1 > len(x)-1:
-            t1 = len(x)-1
+    power_mat = np.full((len(win_mean), len(win_range), len(x)), np.nan)
 
-        for i in range(results_mat.shape[0]):
-            for j in range(results_mat.shape[1]):
-                #print(f"{t}, {i}, {j}")
-
-                #grab mean and range
-                mean_i = win_mean[i]
-                range_j = win_range[j]
-                
-                min_i = mean_i - range_j
-                max_i = mean_i + range_j
-                
-                if max_i > np.nanmax(x_trim) or min_i < np.nanmin(x_trim):
-                    continue
+    def process_combination(i, j):
+        mean_i = win_mean[i]
+        range_j = win_range[j]
         
-                x_subset = x_trim.copy()
-                x_subset = x_subset[int(t0):int(t1)]
-                
-                x_subset[np.where(x_subset > max_i)] = np.nan
-                x_subset[np.where(x_subset < min_i)] = np.nan
-                    
-                if np.all(np.isnan(x_subset)):
-                    continue
-                
-                actual_mean = np.nanmean(x_subset)
-                mean_error = mean_i - actual_mean
+        min_i = mean_i - range_j
+        max_i = mean_i + range_j
+        
+        if max_i > np.nanmax(x_trim) or min_i < np.nanmin(x_trim):
+            return None
+
+        x_subset = x_trim.copy()
+        
+        x_subset[np.where(x_subset > max_i)] = np.nan
+        x_subset[np.where(x_subset < min_i)] = np.nan
+            
+        if np.all(np.isnan(x_subset)):
+            return None
+        
+        actual_mean = np.nanmean(x_subset)
+        
+        na_ind = np.where(np.isnan(x_subset))[0]
+
+        if (len(x_subset) - len(na_ind)) / len(x_subset) < 0.05:
+            return None
+
+        x_subset[na_ind] = actual_mean
+        std_x = np.std(x_subset)
+
+        if np.std(x_subset) == 0 or np.isnan(std_x) or len(set(x_subset)) < 2:
+            return None
+
+        x_subset = stats.zscore(x_subset)
+
+        x_smooth = lowess(x_subset, np.arange(len(x_subset)), frac=0.75)
+        x_subset = x_subset.copy() - x_smooth[:, 1]
+
+        wx, scales, *_ = ssq.cwt(x_subset, wavelet, fs=fs)
+        freqs = scale_to_freq(scales, wavelet, len(x_subset), fs=fs)
+        periods = 1/freqs
+
+        power_mat_comb = np.full((len(x), len(nseas)), np.nan)
+
+        wx_rec = wx.copy()
+        mask = (periods <= u_period) & (periods >= l_period)
+        wx_rec[~mask, :] = np.nan
+        
+        power_mat_comb = np.nanmean(np.abs(wx_rec), axis=0)
+        
+        return i, j, power_mat_comb
+
+    results = Parallel(n_jobs=-1)(delayed(process_combination)(i, j) for i in range(power_mat.shape[0]) for j in range(power_mat.shape[1]))
+
+    for res in results:
+        if res is not None:
+            i, j, power_mat_comb = res
+            power_mat[i, j, :] = power_mat_comb
+
+    #find average power mat
+    av_power_mat = np.nanmean(power_mat, axis = 2)
+    slice_min = np.nanmin(av_power_mat)
+    slice_max = np.nanmax(av_power_mat)
+    normalized_matrix = (av_power_mat - slice_min) / (slice_max - slice_min)
+    adjusted_slice = normalized_matrix * (1 - cost) + cost
+
+    #extract annual signal
+    center_mat = np.nanmax(power_mat, axis = 1)
+    range_mat = np.nanmax(power_mat, axis = 0)
+
+    #best_power = np.nanmax(center_mat, axis = 0)
+    best_center_ind = np.nanargmax(center_mat, axis = 0)
+    best_range_ind = np.nanargmax(range_mat, axis = 0)
+
+    weighted_power_mat = power_mat.copy()
+
+    for t in range(power_mat.shape[2]):
+        weighted_power_mat[:, :, t] *= adjusted_slice
+
+    #extract annual signal
+    center_mat_w = np.nanmax(weighted_power_mat, axis = 1)
+    range_mat_w = np.nanmax(weighted_power_mat, axis = 0)
+
+    best_center_ind = np.nanargmax(center_mat_w, axis = 0)
+    best_range_ind = np.nanargmax(range_mat_w, axis = 0)
+
+    loc_mean = win_mean[best_center_ind] 
+    loc_min = loc_mean - win_range[best_range_ind] - buff
+    loc_max = loc_mean + win_range[best_range_ind] + buff
+
+    #for t in range(center_mat.shape[1]):
+    #    best_power[t] = center_mat[best_center_ind[t], t]
+
+    best_power = center_mat[best_center_ind, np.arange(center_mat.shape[1])]
+
+    #define signal significance
+    sig_vector = best_power >= sig_wp
     
-                mean_err_mat[i, j, t] = mean_error
-                
-                na_ind = np.where(np.isnan(x_subset))
-                x_subset[na_ind] = actual_mean
-                std_x = np.std(x_subset)
+    signal_index = {
+        'ind_center': best_center_ind,
+        'ind_range': best_range_ind,
+    }
+    
+    signal_location = {
+        'loc_center': loc_mean,
+        'loc_min': loc_min,
+        'loc_max': loc_max
+    }
 
-                if np.std(x_subset) == 0 or np.isnan(std_x) or len(set(x_subset)) < 2:
-                   continue
+    return signal_index, signal_location, best_power, sig_vector, av_power_mat, power_mat, center_mat, range_mat
 
-                x_subset = stats.zscore(x_subset)
+def sweep_extract(x_subset, wavelet, fs, l_period, exp):
 
-                x_smooth = lowess(x_subset, np.arange(len(x_subset)), frac=0.75)
-                x_subset = x_subset.copy() - x_smooth[:, 1]
-
-                #####squeezepy cwt#####
-                wx, scales, *_ = ssq.cwt(x_subset, wavelet, fs=fs)
-                freqs = scale_to_freq(scales, wavelet, len(x_subset), fs=fs)
-                periods = 1/freqs
-
-                mask = (periods <= u_bound) & (periods >= l_bound)
-                wx[~mask, :] = 0
-                rec = ssq.icwt(wx, wavelet, scales)
-
-                #####waveletcomp cwt#####
-
-                #wc_wx, Phase, Ampl, wc_periods, wc_scales, Power = wc_cwt_morlet(x_subset, dt=1, dj=1/20, lowerPeriod=l_bound, upperPeriod=u_bound)
-                #rec = wc_rec(wc_wx, wc_scales, dt = 1, dj = 1/20, nr = len(wc_scales), nc = len(x_subset))
-                
-                results_mat[i, j, t] = np.std(rec, ddof =1)
-
-
-    return results_mat, mean_err_mat
-
-def sweep_extract(x, wavelet, fs, signal_location_matrix, signal_mean_error, win_mean, win_range, win_time, u_period, l_period, buff, sig_lvl, exp):
-
-    sig_loc = extract_ind(signal_location_matrix)
-
-    sig_loc['time'] = win_time
-    sig_loc['mean'] = win_mean[sig_loc['mean_i']]
-    sig_loc['range'] = win_range[sig_loc['range_i']]
-
-    sig_loc['mean_err'] = signal_mean_error[sig_loc.iloc[:, 0], sig_loc.iloc[:, 1], np.arange(len(sig_loc))]
-    sig_loc['mean_adj'] = sig_loc['mean'] - sig_loc['mean_err']
-
-    mean_infil = pd.Series([np.nan] * len(x))
-    range_infil = pd.Series([np.nan] * len(x))
-    error_infil = pd.Series([np.nan] * len(x))
-
-    mean_infil[win_time] = sig_loc['mean_adj']
-    range_infil[win_time] = sig_loc['range']
-    error_infil[win_time] = sig_loc['mean_err']
-
-    mean_infil = mean_infil.interpolate(method='linear')
-    range_infil = range_infil.interpolate(method='linear')
-    error_infil = error_infil.interpolate(method='linear')
-
-    min_infil = mean_infil - range_infil - buff
-    max_infil = mean_infil + range_infil + buff
-
-    x_subset = x.copy()
-    ind_rm = (x_subset > max_infil) | (x_subset < min_infil)
-    x_subset[ind_rm] = np.nan
-    x_subset = pd.Series(x_subset).interpolate(method='linear', limit_direction='both').values
-    x_subset[np.where(np.isnan(x_subset))] = np.mean(x_subset[~np.isnan(x_subset)])
-
-    wx_og, periods, scales_og, p_values, sig_mat = ssq_cwt_sig(x_subset, wavelet, fs, n = 1000, sig_lvl = sig_lvl)
+    X = stats.zscore(x_subset)
+    wx_og, scales, *_ = ssq.cwt(X, wavelet, fs=fs)
+    freqs = scale_to_freq(scales, wavelet, len(x_subset), fs=fs)
+    periods = 1/freqs
 
     lower_ind = np.argmin(np.abs(periods - l_period))
-    upper_ind = np.argmin(np.abs(periods - u_period))
-
-    sig_vector = np.any(sig_mat[lower_ind:upper_ind], axis=0)
-    #p_inds = np.argmin(np.abs(periods - l_period)) + 1, np.argmin(np.abs(periods - u_period)) + 1
-    #suppression_mask = np.full((wx_og.shape[0], wx_og.shape[1]), np.nan)
-
     factor_mask = np.ones((wx_og.shape[0], wx_og.shape[1]), dtype='float')
 
-    mask = (p_values < sig_lvl) & (np.arange(p_values.shape[0])[:, None] >= lower_ind) & (np.arange(p_values.shape[0])[:, None] <= upper_ind)
-    max_indices = np.argmax(mask[::-1], axis=0)
-    max_indices = mask.shape[0] - max_indices - 1  # Convert from reverse index
-
-    mask[:, :] = False
-    for j in range(p_values.shape[1]):
-        if max_indices[j] > 0:
-            mask[max_indices[j]:, j] = True
-        else:
-            mask[upper_ind:, j] = True
-
-    for j in range(mask.shape[1]):
-        indices = np.where(~mask[:, j])[0]
+    for j in range(factor_mask.shape[1]):
+        indices = np.arange(0, lower_ind)
         factor_mask[indices, j] = normalize_vector(indices) ** exp
 
     wx_filt = wx_og * factor_mask
-    rec = ssq.icwt(wx_filt, wavelet, scales_og)
-    rec_rescale = (rec / np.std(rec)) * np.std(x_subset) + np.mean(x_subset)
-    rec_rescale[ind_rm] = np.nan
+    rec = ssq.icwt(wx_filt, wavelet, scales)
+    rec_rescale = rec * np.std(x_subset) + np.mean(x_subset) #(rec / np.std(rec)) * np.std(x_subset) + np.mean(x_subset)
 
-    return(rec_rescale, sig_vector)
+    return rec, wx_og, wx_filt, factor_mask
 
 
 #LIU DLM FUNCTIONS
