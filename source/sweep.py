@@ -300,6 +300,83 @@ def sweep_locate(x, win_mean, win_range, wavelet, fs, l_period, u_period, min_th
 
     return signal_index, signal_location, best_power, sig_vector, av_power_mat, power_mat, center_mat, range_mat
 
+def infil_signal(signal_index, signal_location, best_power, sig_vector, av_power_mat):
+
+    best_center_ind = signal_index['ind_center']
+    best_range_ind = signal_index['ind_range']
+    loc_mean = signal_location['loc_center']
+    loc_min = signal_location['loc_min']
+    loc_max = signal_location['loc_max']
+
+    best_power_sig = best_power.copy()
+    best_power_sig[~sig_vector] = np.nan
+
+    best_center_ind_sig = best_center_ind.copy()
+    best_center_ind_sig = best_center_ind_sig.astype('float')
+    best_center_ind_sig[~sig_vector] = np.nan
+
+    best_range_ind_sig = best_range_ind.copy()
+    best_range_ind_sig = best_range_ind_sig.astype('float')
+    best_range_ind_sig[~sig_vector] = np.nan
+
+    loc_mean_sig = loc_mean.copy()
+    loc_min_sig = loc_min.copy()
+    loc_max_sig = loc_max.copy()
+
+    loc_mean_sig[~sig_vector] = np.nan
+    loc_min_sig[~sig_vector] = np.nan
+    loc_max_sig[~sig_vector] = np.nan
+
+    loc_mean_if = pd.Series(loc_mean_sig).ffill()
+    loc_min_if = pd.Series(loc_min_sig).ffill()
+    loc_max_if = pd.Series(loc_max_sig).ffill()
+
+    av_center_mat = np.nanmax(av_power_mat, axis = 1)
+    av_range_mat = np.nanmax(av_power_mat, axis = 0)
+
+    av_center_ind = np.nanargmax(av_center_mat)
+    av_range_ind = np.nanargmax(av_range_mat)
+
+    loc_mean_if[np.isnan(loc_mean_if)] = win_mean[av_center_ind] 
+    loc_min_if[np.isnan(loc_min_if)] = loc_mean_if[np.isnan(loc_min_if)] - win_range[av_range_ind] - buff
+    loc_max_if[np.isnan(loc_max_if)] = loc_mean_if[np.isnan(loc_max_if)] + win_range[av_range_ind] + buff
+
+    best_center_ind_if = best_center_ind.copy() 
+    best_center_ind_if = best_center_ind_if.astype('float')
+    best_center_ind_if[~sig_vector] = np.nan
+    best_center_ind_if = pd.Series(best_center_ind_if).ffill()
+    best_center_ind_if[np.isnan(best_center_ind_if)] = av_center_ind
+
+    best_range_ind_if = best_range_ind.copy() 
+    best_range_ind_if = best_range_ind_if.astype('float')
+    best_range_ind_if[~sig_vector] = np.nan
+    best_range_ind_if = pd.Series(best_range_ind_if).ffill()
+    best_range_ind_if[np.isnan(best_range_ind_if)] = av_range_ind
+
+    signal_index_infil = {
+        'ind_center': best_center_ind_if,
+        'ind_range': best_range_ind_if
+    }
+    
+    signal_location_infil = {
+        'loc_center': loc_mean_if,
+        'loc_min': loc_min_if,
+        'loc_max': loc_max_if
+    }
+
+    signal_index_sigonly = {
+        'ind_center': best_center_ind_sig,
+        'ind_range': best_range_ind_sig
+    }
+
+    signal_location_sigonly = {
+        'loc_center': loc_mean_sig,
+        'loc_min': loc_min_sig,
+        'loc_max': loc_max_sig
+    }
+
+    return signal_index_infil, signal_index_sigonly, signal_location_infil, signal_location_sigonly
+
 def sweep_extract(x_subset, wavelet, fs, l_period, exp):
 
     X = stats.zscore(x_subset)
@@ -343,8 +420,8 @@ class Model:
         S = np.power(0.2,2); nu = ntrend+nregn+pseas;
         pr = Prior(m,C,S,nu)
         self.prior = pr
-        
-        
+
+
 def forwardFilteringM(Model, fs):
     # All the parameters estimated here correspond Eqs. 13-16 and the related ones in the Supplementary Information of Liu et al. (2019)
     # notation in the code -> notation in Liu et al., 2019: 
