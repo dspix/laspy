@@ -23,6 +23,9 @@ from helper_functions import calculate_bounds, to_df, get_api_response, wave_var
 from sweep_landscape_functions import sweep_locate, sweep_infil, sweep_extract, synth_max_wp, PES
 from gee_import import Mod09gq_profiler, Mod13Q1_profiler
 
+import numpy as np
+from stl import mesh
+
 # Change the current working directory to the specified path
 os.chdir("C:/Users/Will.Rust/OneDrive - Cranfield University/postdoc/Environment/Projects/RESTRECO/sweep_paper")
 
@@ -1260,10 +1263,6 @@ for i in range(len(cosmos_data)):
                 )
 
 
-    # Example usage
-
-    
-
     rotate_plot_and_light(rotation_degree=site_params[1], light_degree=site_params[2])
 
     #glenW 210, 27, z_min = 3, x_lab = 0.1
@@ -1272,6 +1271,44 @@ for i in range(len(cosmos_data)):
     frames_dir = "data_out/figs/surfaces"
     frame_path = os.path.join(frames_dir, f"attr_surface_{site_data['site_name']}.png")
     frame_fig.write_image(frame_path, engine="kaleido", width=1080, height=960)
+
+
+    #CODE FOR STL
+
+
+
+    x = np.arange(potential.shape[0])
+    y = np.arange(potential.shape[1])
+    x, y = np.meshgrid(x, y)
+    z = potential  # Height values
+
+    # Create the faces of the mesh
+    faces = []
+    for i in range(potential.shape[0] - 1):
+        for j in range(potential.shape[1] - 1):
+            # Define the four corner points of the cell
+            v0 = [x[i, j], y[i, j], z[i, j]]
+            v1 = [x[i + 1, j], y[i + 1, j], z[i + 1, j]]
+            v2 = [x[i, j + 1], y[i, j + 1], z[i, j + 1]]
+            v3 = [x[i + 1, j + 1], y[i + 1, j + 1], z[i + 1, j + 1]]
+
+            # Define two triangles per grid cell
+            faces.append([v0, v1, v2])
+            faces.append([v1, v3, v2])
+
+    # Convert faces to numpy array
+    faces = np.array(faces)
+
+    # Create the mesh
+    surface_mesh = mesh.Mesh(np.zeros(faces.shape[0], dtype=mesh.Mesh.dtype))
+    for i, f in enumerate(faces):
+        for j in range(3):
+            surface_mesh.vectors[i][j] = f[j]
+        
+    # Save the STL file
+    stl_dir = "data_out/stl"
+    frame_path = os.path.join(stl_dir, f"surface_{site_data['site_name']}.stl")
+    surface_mesh.save(frame_path)
 
     ########################
     #PREPARE TABLES
