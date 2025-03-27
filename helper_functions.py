@@ -5,16 +5,7 @@ import requests
 import numpy as np
 import pandas as pd
 
-def calculate_bounds(sm, sC, snu, quantile):
-
-    lower_bounds = np.array(list(map(lambda m, C, nu: m - np.sqrt(C) * tdstr.ppf(quantile, nu), sm, sC, snu)))
-    upper_bounds = np.array(list(map(lambda m, C, nu: m + np.sqrt(C) * tdstr.ppf(quantile, nu), sm, sC, snu)))
-    
-    return lower_bounds, upper_bounds
-
-
 def expand_to_df(dict_of_feats):
-  '''Expand key-value pairs to columns'''
   df = pd.DataFrame(dict_of_feats)
   cols = [i for i in df.columns if isinstance(df[i][0], dict)]
   for col in cols:
@@ -29,56 +20,91 @@ def to_df(response):
   return data
 
 def get_api_response(url):
-    response = requests.get(url)
-    return response.json()
+  response = requests.get(url)
+  return response.json()
+
+def calculate_bounds(sm, sC, snu, quantile):
+  """
+  Calculate confidence interval bounds from dlm.
+
+  Args:
+      sm (np.ndarray): Mean estimates.
+      sC (np.ndarray): Variance estimates.
+      snu (np.ndarray): Degrees of freedom for t-distribution.
+      quantile (float): Quantile value.
+
+  Returns:
+      lower_bounds (np.ndarray): Lower confidence interval bounds.
+      upper_bounds (np.ndarray): Upper confidence interval bounds.
+  """
+
+  lower_bounds = np.array(list(map(lambda m, C, nu: m - np.sqrt(C) * tdstr.ppf(quantile, nu), sm, sC, snu)))
+  upper_bounds = np.array(list(map(lambda m, C, nu: m + np.sqrt(C) * tdstr.ppf(quantile, nu), sm, sC, snu)))
+  
+  return lower_bounds, upper_bounds
 
 def wave_variance(x, y, fs, u_period, l_period):
+  """
+  Compute coherence-power ratio (CPR) between two time series.
 
-    x_nan = np.isnan(x)
+  Args:
+      x (np.ndarray): First signal (e.g., environmental driver).
+      y (np.ndarray): Second signal (e.g., ecosystem response).
+      fs (float): Sampling frequency.
+      u_period (float): Upper period threshold (e.g., 365 for annual).
+      l_period (float): Lower period threshold.
 
-    x = pd.Series(x).interpolate(method='linear', limit_direction='both').values
-    x[np.where(np.isnan(x))] = np.mean(x[~np.isnan(x)])
-    
-    y = pd.Series(y).interpolate(method='linear', limit_direction='both').values
-    y[np.where(np.isnan(y))] = np.mean(y[~np.isnan(y)])
+  Returns:
+      WCT (np.ndarray): Wavelet coherence values.
+      wav_coh (float): Average coherence over target periods.
+      wav_r2 (float): Power-weighted coherence (R^2-like).
+      mean_phase (float): Mean phase offset.
+      mean_phase_day (float): Phase offset in units of days.
+  """
+  x_nan = np.isnan(x)
 
-    wavelet_mother=wavelet.Morlet(6)
-    WCT, phase, coi, freq, *_ = wct(x, y, 1, 1/10, s0=-1, J=-1, sig=False, significance_level=0.95, wavelet=wavelet_mother, normalize=True)
-    
-    periods = 1 / freq
-    period_indices = np.where((periods >= l_period/fs) & (periods <= u_period/fs))[0]
-    Wx, _, _, _, _, _ = cwt(x, 1, dj=1/10, s0=-1, J=-1, wavelet=wavelet_mother)
-    power_x = np.abs(Wx) ** 2
-    
-    WCT[:, ~x_nan] = np.nan
-    power_x[:, ~x_nan] = np.nan
-    phase[:, ~x_nan] = np.nan
+  x = pd.Series(x).interpolate(method='linear', limit_direction='both').values
+  x[np.where(np.isnan(x))] = np.mean(x[~np.isnan(x)])
+  
+  y = pd.Series(y).interpolate(method='linear', limit_direction='both').values
+  y[np.where(np.isnan(y))] = np.mean(y[~np.isnan(y)])
 
-    #coherence measures correlation irrespective of power - so can be misleading as all powers may not contribute
-    coherence_power = np.nansum(WCT[period_indices, :] * power_x[period_indices, :], axis=0)
-    total_power = np.nansum(power_x[period_indices, :], axis=0)
+  wavelet_mother=wavelet.Morlet(6)
+  WCT, phase, coi, freq, *_ = wct(x, y, 1, 1/10, s0=-1, J=-1, sig=False, significance_level=0.95, wavelet=wavelet_mother, normalize=True)
+  
+  periods = 1 / freq
+  period_indices = np.where((periods >= l_period/fs) & (periods <= u_period/fs))[0]
+  Wx, _, _, _, _, _ = cwt(x, 1, dj=1/10, s0=-1, J=-1, wavelet=wavelet_mother)
+  power_x = np.abs(Wx) ** 2
+  
+  WCT[:, ~x_nan] = np.nan
+  power_x[:, ~x_nan] = np.nan
+  phase[:, ~x_nan] = np.nan
 
-    wav_r2 = np.nansum(coherence_power) / np.sum(total_power)
-    wav_coh = np.nanmean(WCT[period_indices, :])
+  #coherence measures correlation irrespective of power - so can be misleading as all powers may not contribute
+  coherence_power = np.nansum(WCT[period_indices, :] * power_x[period_indices, :], axis=0)
+  total_power = np.nansum(power_x[period_indices, :], axis=0)
 
-    annual = 365.25
-    half_annual = 365.25 / 2
+  wav_r2 = np.nansum(coherence_power) / np.sum(total_power)
+  wav_coh = np.nanmean(WCT[period_indices, :])
 
-    ann_ind = np.argmin(np.abs(periods - (annual/fs)))
-    sub_ind = np.argmin(np.abs(periods - (half_annual/fs)))
+  annual = 365.25
+  half_annual = 365.25 / 2
 
-    ann_angles = np.nanmean(phase[ann_ind, :])
-    sub_angles = np.nanmean(phase[sub_ind, :])
+  ann_ind = np.argmin(np.abs(periods - (annual/fs)))
+  sub_ind = np.argmin(np.abs(periods - (half_annual/fs)))
 
-    mean_phase = (ann_angles + sub_angles) / 2
+  ann_angles = np.nanmean(phase[ann_ind, :])
+  sub_angles = np.nanmean(phase[sub_ind, :])
 
-    def phase_to_day(phase, period):
-        return (np.abs(phase) / np.pi) * (period / 2)
+  mean_phase = (ann_angles + sub_angles) / 2
 
-    #phase_av = np.nanmean(phase[period_indices, :], axis=1)#, weights=WCT[period_indices, :] * power_x[period_indices, :])
-    mean_phase_day = (phase_to_day(ann_angles, annual) + phase_to_day(sub_angles, half_annual)) / 2
+  def phase_to_day(phase, period):
+      return (np.abs(phase) / np.pi) * (period / 2)
 
-    return WCT, wav_coh, wav_r2, mean_phase, mean_phase_day
+  mean_phase_day = (phase_to_day(ann_angles, annual) + phase_to_day(sub_angles, half_annual)) / 2
+
+  return WCT, wav_coh, wav_r2, mean_phase, mean_phase_day
 
 
 
