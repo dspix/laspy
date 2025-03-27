@@ -1,10 +1,8 @@
 import os
 from datetime import datetime
 import datetime as dt
-import geopandas as gpd
 
-from shapely.geometry import Polygon
-from pyproj import Transformer, CRS
+from pyproj import Transformer
 
 import matplotlib.pyplot as plt
 import ee
@@ -20,15 +18,10 @@ import matplotlib.colors as mcolors
 import matplotlib.cm as cm
 import fnmatch
 
-from scipy.interpolate import griddata
-
 from dlm_functions import run_dlm
 from helper_functions import calculate_bounds, to_df, get_api_response, wave_variance
-from sweep_landscape_functions import sweep_locate, sweep_infil, sweep_extract, synth_max_wp, PES, plot_landscape
+from sweep_landscape_functions import sweep_locate, sweep_infil, sweep_extract, plot_landscape, plot_landscape_gif
 from gee_import import Mod09gq_profiler, Mod13Q1_profiler
-
-import numpy as np
-from stl import mesh
 
 # Change the current working directory to the specified path
 os.chdir("C:/Users/Will.Rust/OneDrive - Cranfield University/postdoc/Environment/Projects/RESTRECO/sweep_paper")
@@ -341,6 +334,8 @@ warmup = int(365 * 1.5)
 
 #import surface plot parameters
 surface_plot_params = pd.read_csv('COSMOS_3d_plot_params.csv')
+
+df.to_csv('sweep_sites.csv', index=False)
 
 for i in range(len(cosmos_data)):
 #for i in sites_i:
@@ -810,6 +805,7 @@ for i in range(len(cosmos_data)):
     dates = cosmos_df['dt']
     plot_params = surface_plot_params.iloc[i]
     site_name = site_data['site_name']
+    warmup = int(plot_params[3])
 
     file_name = f"attr_surface_{plot_params[0]}.png"
     plot_landscape(FF_sweep, warmup, dates, plot_params, file_name)
@@ -957,10 +953,24 @@ print(dlm_latex)
 
 #PLOT GIFS
 
+#glenwherry
 i = 18
+warmup = int(365 * 1.5)
+
+#stiperstones
 i = 44
-i = 47
-i = 31
+warmup = int(365 * 2)
+
+#moor house
+i = 30
+warmup = int(365 * 1.5)
+
+#gisbun forest
+i = 16
+warmup = int(365 * 2.4)
+
+
+
 
 site_data = cosmos_sites_df.iloc[i]
 plot_title = f"Site: {site_data['site_name']}, Land use: {site_data['land_cover']}"
@@ -1007,16 +1017,10 @@ sm_sweep, sC_sweep, snu_sweep, FF_sweep, *_ = run_dlm(x_sweep.values, anCLM, vid
 dates = cosmos_df['dt']
 plot_params = surface_plot_params.iloc[i]
 site_name = site_data['site_name']
-
-#plot_params[1] = plot_params[1] - 60
-plot_params["light_xyz"] = [20, -50, 1]
-
-sm_fix = FF_sweep['sm']
-sm_fix[2, :] = sm_fix[2, :]
+warmup = int(plot_params[3])
 
 file_name = f"attr_surface_{plot_params[0]}.png"
-
-
+plot_landscape(FF_sweep, warmup, dates, plot_params, file_name)
 
 
 #code to produce GIF
@@ -1026,539 +1030,10 @@ file_name = f"attr_surface_{plot_params[0]}.png"
 ########################
 
 
-def plot_landscape_gif(FF_sweep, warmup, plot_params):
 
-    import numpy as np
-    import os
-    import imageio
-    from tqdm import tqdm
-    from joblib import Parallel, delayed
-    import plotly.graph_objects as go
-    from scipy.interpolate import griddata
-    from scipy.spatial.distance import cdist
-    from matplotlib.colors import LightSource
-    from scipy.ndimage import gaussian_filter
-    from scipy.ndimage import median_filter
 
-    camera_distance = 1.75
-    rotation_degree = 145
-    rotation_rad = np.radians(rotation_degree)
+plot_landscape_gif(FF_sweep, warmup, dates, plot_params)
 
-    # Camera position (rotating around Z-axis)
-    eye_x = np.sin(rotation_rad) * camera_distance  # Rotates around Z-axis
-    eye_y = np.cos(rotation_rad) * camera_distance
-    eye_z = 1.28  # Keeping z fixed
-
-
-    n = 5
-
-    potential, X, Y, pdf, local_mean, ar1_resilience = PES(FF_sweep['sm'], FF_sweep['sC'], 0, 2, warmup)
-
-    potential = np.sqrt(potential - np.nanmin(potential) + 1) - 1
-    potential = gaussian_filter(potential, sigma=3)
-
-    # Subsample every nth timestep
-    subsampled_local_mean = local_mean[::n]
-    subsampled_ar1_resilience = ar1_resilience[::n]
-    
-    def moving_average(data, window_size):
-        if window_size % 2 == 0:
-            raise ValueError("Window size must be an odd number to ensure central averaging.")
-
-        half_window = window_size // 2
-        smoothed = np.array(data, dtype=float)  # Ensure floating point calculations
-        result = np.copy(smoothed)
-
-        for i in range(len(data)):
-            start = max(0, i - half_window)
-            end = min(len(data), i + half_window + 1)
-            result[i] = np.mean(smoothed[start:end])
-
-        return result
-
-    subsampled_local_mean = moving_average(subsampled_local_mean, window_size=31)
-    subsampled_ar1_resilience = moving_average(subsampled_ar1_resilience, window_size=31)
-
-    # Create a meshgrid for X, Y, and flatten it for interpolation
-    x_flat = X.ravel()
-    y_flat = Y.ravel()
-    z_flat = potential.ravel()
-
-    z_offset = 0.2
-
-    #light = LightSource(azdeg=80, altdeg=45, hsv_min_val = 0)  # Angle of the light
-
-    # Prepare static surface with proper shading, lighting, and aspect ratio
-    attr_surface = go.Surface(
-        z=potential,
-        x=X,
-        y=Y,
-        surfacecolor=potential,
-        colorscale="Spectral",
-        cmin=0.8,
-        cmax=3.8,
-        opacity=1,
-        lighting=dict(
-            ambient=0.4,    # surface
-            diffuse=0.6,    # surface
-            specular=0.3,   # surface
-            roughness=0.5,  # surface
-            fresnel=0.1,    # surface
-        ),
-        lightposition=dict(
-            x=3,
-            y=3,
-            z=1,
-        ),
-        contours=dict(
-            z=dict(
-                show=True,
-                start=0,
-                end=4,
-                size=0.2,
-                color="black",
-                width=2,
-            )
-        ),
-        showscale=False,  # No color bar
-        name="Potential Energy Surface",
-    )
-
-
-    # Define fixed axis ranges with margins
-    pad = 0.05
-    x_range_full = [X.min(), X.max()]
-    y_range_full = [Y.min(), Y.max()]
-    z_range_full = [potential.min(), potential.max() + z_offset]
-
-    x_margin = pad * (x_range_full[1] - x_range_full[0])
-    y_margin = pad * (y_range_full[1] - y_range_full[0])
-    z_margin = pad * (z_range_full[1] - z_range_full[0])
-
-    x_range_fixed = [x_range_full[0] - x_margin, x_range_full[1] + x_margin]
-    y_range_fixed = [y_range_full[0] - y_margin, y_range_full[1] + y_margin]
-    z_range_fixed = [z_range_full[0] - z_margin, z_range_full[1] + z_margin]
-
-    axis_limits = (x_range_fixed, y_range_fixed, z_range_fixed)
-    aspect_ratio = (1, 1, 0.5)  # Specified aspect ratio
-
-    #DEFINE TIME TRAJECETORY
-    time_traj = {"x": [], "y": [], "z": []}
-
-    # Precompute the full path
-    for j in range(len(subsampled_local_mean)):
-        x, y = subsampled_local_mean[j], subsampled_ar1_resilience[j]
-        z = griddata((x_flat, y_flat), z_flat, (x, y), method="linear")
-        
-        # Handle interpolation failures
-        if z is None:
-            z = potential.min()
-
-        # Append the current ball position to the path
-        time_traj["x"].append(x)
-        time_traj["y"].append(y)
-        time_traj["z"].append(z + 0.3)  # Slightly elevate the path above the surface
-
-
-    dx = np.diff(time_traj["x"])
-    dy = np.diff(time_traj["y"])
-    dz = np.diff(time_traj["z"])
-    norms = np.sqrt(dx**2 + dy**2 + dz**2)
-    dx /= norms  # Normalize
-    dy /= norms
-    dz /= norms
-
-    # Sample at regular intervals (e.g., every 5 points)
-    indices = np.arange(0, len(dx), 182)
-    arrow_x = np.array(time_traj["x"])[indices]
-    arrow_y = np.array(time_traj["y"])[indices]
-    arrow_z = np.array(time_traj["z"])[indices]
-    arrow_dx = dx[indices]
-    arrow_dy = dy[indices]
-    arrow_dz = dz[indices]
-
-    # Create the arrows (cones)
-    #arrow_trace = go.Cone(
-    #x=arrow_x,
-    #y=arrow_y,
-    #z=arrow_z,
-    #u=arrow_dx,
-    #v=arrow_dy,
-    #w=arrow_dz,
-    #sizemode="absolute",
-    #sizeref=2,  # Adjust arrow size
-    #anchor="tip",
-    #colorscale=[[0, "red"], [1, "red"]],
-    #showscale=False
-    #)
-
-    #frame_fig = go.Figure(data=[attr_surface, path_trace])
-
-    #EDIT angle and light source
-    import plotly.graph_objects as go
-
-    # Generate Sphere
-    phi, theta = np.linspace(0, np.pi, 20), np.linspace(0, 2 * np.pi, 20)
-    phi, theta = np.meshgrid(phi, theta)
-    sphere_x_base = np.sin(phi) * np.cos(theta)
-    sphere_y_base = np.sin(phi) * np.sin(theta)
-    sphere_z_base = np.cos(phi)
-    radius_percentage = 0.05  # Ball diameter as 5% of axis limits
-
-    def update_sphere_scaled(center, radius_percentage, axis_limits, aspect_ratio):
-        """Generate a sphere scaled according to axis limits and aspect ratio."""
-        x_range, y_range, z_range = axis_limits
-        x_aspect, y_aspect, z_aspect = aspect_ratio
-
-        # Scale the radius based on axis limits and aspect ratio
-        x_scale = (x_range[1] - x_range[0]) * radius_percentage / x_aspect
-        y_scale = (y_range[1] - y_range[0]) * radius_percentage / y_aspect
-        z_scale = (z_range[1] - z_range[0]) * radius_percentage / z_aspect
-
-        x = center[0] + x_scale * sphere_x_base
-        y = center[1] + y_scale * sphere_y_base
-        z = center[2] + z_scale * sphere_z_base
-        return x, y, z
-
-    # Parallelize frame rendering
-    def render_frame(i):
-        x, y = subsampled_local_mean[i], subsampled_ar1_resilience[i]
-        z = griddata((x_flat, y_flat), z_flat, (x, y), method="linear")
-        
-        # Handle interpolation failures
-        if z is None:
-            z = potential.min()
-
-        # Path as a dotted red line slightly above the surface
-        path_trace = go.Scatter3d(
-            x=time_traj["x"][:i + 1],  # Use only the path up to the current frame
-            y=time_traj["y"][:i + 1],
-            z=time_traj["z"][:i + 1],
-            mode="lines",
-            line=dict(color="red", width=15),  # Dotted red line
-            name="Path",
-        )
-
-        # Ball with consistent shading and lighting
-        sphere_x, sphere_y, sphere_z = update_sphere_scaled([x, y, z + z_offset], radius_percentage, axis_limits, aspect_ratio)
-        ball_trace = go.Surface(
-            x=sphere_x,
-            y=sphere_y,
-            z=sphere_z,
-            surfacecolor=np.zeros_like(sphere_x),  # Uniform color
-            colorscale=[[0, "red"], [1, "red"]],  # Fixed red color
-            showscale=False,  # No color bar
-            lighting=dict(
-                ambient=0.7,
-                diffuse=0.2,
-                specular=0.8,
-                roughness=0.5,
-                fresnel=0.2,
-            ),
-            lightposition=dict(
-                x=3,
-                y=3,
-                z=1,
-            ),
-            opacity=1,
-            name="Ball",
-        )
-
-        # Create figure for each frame
-        frame_fig = go.Figure(data=[attr_surface, ball_trace, path_trace])
-    
-        # Update layout with consistent camera, aspect ratio, and formatting
-        frame_fig.update_layout(
-            scene=dict(
-                xaxis=dict(
-                    title="NDVI Anomaly",  # No title
-                    range=x_range_fixed,
-                    showspikes=False,
-                    showbackground=False,  # Remove background
-                    zeroline=True,
-                    zerolinecolor="black",
-                    showline=True,
-                    linecolor="black",
-                    linewidth=2,
-                    tickcolor="black",
-                    tickwidth=2,
-                    gridcolor="lightgray"
-                ),
-                yaxis=dict(
-                    title="System speed (-AC1)",  # No title
-                    tickmode = "array",
-                    tickvals = np.round(np.arange(-1, 1.1, 0.1), 2),
-                    ticktext = -np.round(np.arange(-1, 1.1, 0.1), 2),
-                    range=y_range_fixed,
-                    showspikes=False,
-                    showbackground=False,
-                    zeroline=True,
-                    zerolinecolor="black",
-                    showline=True,
-                    linecolor="black",
-                    linewidth=2,
-                    tickcolor="black",
-                    tickwidth=2,
-                    gridcolor="lightgray"
-                ),
-                zaxis=dict(
-                    title="Potential",  # No title
-                    range=z_range_fixed,
-                    showspikes=False,
-                    showbackground=False,
-                    zeroline=True,
-                    zerolinecolor="black",
-                    showline=True,
-                    linecolor="black",
-                    linewidth=2,
-                    tickcolor="black",
-                    tickwidth=2,
-                    gridcolor="lightgray",
-                ),
-                aspectmode="manual",  # Maintain the aspect ratio
-                aspectratio=dict(x=1, y=1, z=0.5),
-                camera=dict(
-                    eye=dict(x=-eye_x, y=eye_y, z=eye_z),  # Camera position
-                    #eye=dict(x=0.6, y=-1.6, z=1.6 * 0.8),  # Camera position stiperstones
-                    up=dict(x=1, y=0, z=1),  # "Up" direction
-                    center=dict(x=0, y=0, z=0),  # Center of the view
-                ),
-            ),
-            margin=dict(l=0, r=0, t=0, b=0),  # Remove margins
-            paper_bgcolor="white",  # White background
-            plot_bgcolor="white",  # White grid
-        )   
-
-        # Save frame
-        frame_path = os.path.join(frames_dir, f"frame_{i:04d}.png")
-        frame_fig.write_image(frame_path, engine="kaleido", width=1080, height=960)
-
-    
-    frames_dir = "C:/data/gif_frames"
-    os.makedirs(frames_dir, exist_ok=True)
-
-    Parallel(n_jobs=-1)(delayed(render_frame)(i) for i in range(len(subsampled_local_mean)))
-
-    output_gif = f"data_out/figs/gifs/surface_{plot_params[0]}.gif"
-    with imageio.get_writer(output_gif, mode="I", fps=12, loop=0, codec="png", quantizer="nq") as writer:
-        for frame_file in sorted(os.listdir(frames_dir)):
-            if frame_file.endswith(".png"):
-                writer.append_data(imageio.imread(os.path.join(frames_dir, frame_file)))
-
-    for frame_file in os.listdir(frames_dir):
-        os.remove(os.path.join(frames_dir, frame_file))
-
-    print(f"GIF saved at: {output_gif}")
-
-def plot_landscape_no_details(FF_sweep, warmup, dates, file_name):
-
-    import numpy as np
-    import os
-    import matplotlib.pyplot as plt
-    import plotly.graph_objects as go
-    from scipy.interpolate import griddata
-    from scipy.ndimage import gaussian_filter
-    from matplotlib.gridspec import GridSpec
-    from scipy.spatial.distance import cdist
-
-    camera_distance = 1.75
-    rotation_degree = 145
-    rotation_rad = np.radians(rotation_degree)
-
-    # Camera position (rotating around Z-axis)
-    eye_x = np.sin(rotation_rad) * camera_distance  # Rotates around Z-axis
-    eye_y = np.cos(rotation_rad) * camera_distance
-    eye_z = 1.28  # Keeping z fixed
-
-    # Light position (rotating around Z-axis)
-    n = 5
-
-    potential, X, Y, pdf, local_mean, ar1_resilience = PES(FF_sweep['sm'], FF_sweep['sC'], 0, 2, warmup)
-    dates_clip = dates[warmup: ]
-
-    potential = np.sqrt(potential - np.nanmin(potential) + 1) - 1
-    potential = gaussian_filter(potential, sigma=3)
-
-    # Subsample every nth timestep
-    subsampled_local_mean = local_mean[::n]
-    subsampled_ar1_resilience = ar1_resilience[::n]
-    dates_clip = dates_clip[::n]
-
-    def moving_average(data, window_size):
-        if window_size % 2 == 0:
-            raise ValueError("Window size must be an odd number to ensure central averaging.")
-
-        half_window = window_size // 2
-        smoothed = np.array(data, dtype=float)  # Ensure floating point calculations
-        result = np.copy(smoothed)
-
-        for i in range(len(data)):
-            start = max(0, i - half_window)
-            end = min(len(data), i + half_window + 1)
-            result[i] = np.mean(smoothed[start:end])
-
-        return result
-
-    subsampled_local_mean = moving_average(subsampled_local_mean, window_size=31)
-    subsampled_ar1_resilience = moving_average(subsampled_ar1_resilience, window_size=31)
-
-    # Create a meshgrid for X, Y, and flatten it for interpolation
-    x_flat = X.ravel()
-    y_flat = Y.ravel()
-    z_flat = potential.ravel()
-
-    z_offset = 0.2
-
-    #light = LightSource(azdeg=80, altdeg=45, hsv_min_val = 0)  # Angle of the light
-
-    # Prepare static surface with proper shading, lighting, and aspect ratio
-    attr_surface = go.Surface(
-        z=potential,
-        x=X,
-        y=Y,
-        surfacecolor=potential,
-        colorscale="Spectral",
-        cmin=0.5,
-        cmax=3.8,
-        opacity=1,
-        lighting=dict(
-            ambient=0.4,    # surface
-            diffuse=0.6,    # surface
-            specular=0.3,   # surface
-            roughness=0.5,  # surface
-            fresnel=0.1,    # surface
-        ),
-        lightposition=dict(
-            x=3,
-            y=3,
-            z=1,
-        ),
-        contours=dict(
-            z=dict(
-                show=True,
-                start=0,
-                end=4,
-                size=0.2,
-                color="black",
-                width=2,
-            )
-        ),
-        showscale=False,  # No color bar
-        name="Potential Energy Surface",
-    )
-
-
-    # Define fixed axis ranges with margins
-    pad = 0.05
-    x_range_full = [X.min(), X.max()]
-    y_range_full = [Y.min(), Y.max()]
-    z_range_full = [potential.min(), potential.max() + z_offset]
-
-    x_margin = pad * (x_range_full[1] - x_range_full[0])
-    y_margin = pad * (y_range_full[1] - y_range_full[0])
-    z_margin = pad * (z_range_full[1] - z_range_full[0])
-
-    x_range_fixed = [x_range_full[0] - x_margin, x_range_full[1] + x_margin]
-    y_range_fixed = [y_range_full[0] - y_margin, y_range_full[1] + y_margin]
-    z_range_fixed = [z_range_full[0] - z_margin, z_range_full[1] + z_margin]
-
-    axis_limits = (x_range_fixed, y_range_fixed, z_range_fixed)
-    aspect_ratio = (1, 1, 0.5)  # Specified aspect ratio
-
-    # Create the arrows (cones)
-    #arrow_trace = go.Cone(
-    #x=arrow_x,
-    #y=arrow_y,
-    #z=arrow_z,
-    #u=arrow_dx,
-    #v=arrow_dy,
-    #w=arrow_dz,
-    #sizemode="absolute",
-    #sizeref=2,  # Adjust arrow size
-    #anchor="tip",
-    #colorscale=[[0, "red"], [1, "red"]],
-    #showscale=False
-    #)
-
-    frame_fig = go.Figure(data=[attr_surface])
-
-    # Update layout with consistent camera, aspect ratio, and formatting
-    frame_fig.update_layout(
-        scene=dict(
-            xaxis=dict(
-                title="NDVI Anomaly",  # No title
-                range=x_range_fixed,
-                showspikes=False,
-                showbackground=False,  # Remove background
-                zeroline=True,
-                zerolinecolor="black",
-                showline=True,
-                linecolor="black",
-                linewidth=2,
-                tickcolor="black",
-                tickwidth=2,
-                gridcolor="lightgray"
-            ),
-            yaxis=dict(
-                title="System speed (1 - AC1)",  # No title
-                tickmode = "array",
-                tickvals = np.round(np.arange(-1, 1.1, 0.1), 2),
-                ticktext = -np.round(np.arange(-1, 1.1, 0.1), 2),
-                range=y_range_fixed,
-                showspikes=False,
-                showbackground=False,
-                zeroline=True,
-                zerolinecolor="black",
-                showline=True,
-                linecolor="black",
-                linewidth=2,
-                tickcolor="black",
-                tickwidth=2,
-                gridcolor="lightgray"
-            ),
-            zaxis=dict(
-                title="Potential",  # No title
-                range=z_range_fixed,
-                showspikes=False,
-                showbackground=False,
-                zeroline=True,
-                zerolinecolor="black",
-                showline=True,
-                linecolor="black",
-                linewidth=2,
-                tickcolor="black",
-                tickwidth=2,
-                gridcolor="lightgray",
-            ),
-            aspectmode="manual",  # Maintain the aspect ratio
-            aspectratio=dict(x=1, y=1, z=0.5),
-            camera=dict(
-                eye=dict(x=-eye_x, y=eye_y, z=eye_z),  # Camera position
-                #eye=dict(x=0.6, y=-1.6, z=1.6 * 0.8),  # Camera position stiperstones
-                up=dict(x=1, y=0, z=1),  # "Up" direction
-                center=dict(x=0, y=0, z=0),  # Center of the view
-            ),
-        ),
-        margin=dict(l=0, r=0, t=0, b=0),  # Remove margins
-        paper_bgcolor="white",  # White background
-        plot_bgcolor="white",  # White grid
-    )
-
-    #glenW 210, 27, z_min = 3, x_lab = 0.1
-
-    frame_fig.update_layout(showlegend=False)
-    frame_fig.update_layout(
-        margin=dict(l=0, r=0, t=0, b=0)  
-    )
-
-    # Save frame
-    frames_dir = "data_out/figs/surfaces/no_trace"
-    frame_path = os.path.join(frames_dir, file_name)
-    frame_fig.write_image(frame_path, engine="kaleido", width=1080, height=960)
-
-
-plot_landscape_gif(FF_sweep, warmup, plot_params)
-plot_landscape_no_details(FF_sweep, warmup, dates, file_name)
 
 
 #Time series plot
@@ -1566,6 +1041,8 @@ import matplotlib.pyplot as plt
 import os
 import imageio
 
+
+n = 5
 warmup_n = int(warmup / n)
 
 quantile = 0.9
@@ -1581,48 +1058,7 @@ if len(sweep_ews_ind != 0):
 time_series_frames_dir = "C:/data/gif_frames"
 os.makedirs(time_series_frames_dir, exist_ok=True)
 
-fig, ax = plt.subplots(3, 1, figsize=(5, 5), gridspec_kw={'width_ratios': [1], 'height_ratios': [1, 1, 1]})
-        
-ax[0].scatter(cosmos_df["dt"], cosmos_df['ndvi_d'],  c="lightgrey",  label="Daily NDVI", s = point_size)   
-ax[0].scatter(cosmos_df["dt"], x_sweep, color='black', label='SWEEP NDVI', s=point_size)        
-ax[0].legend(loc='lower right', fontsize = 6, ncol = 3)
-
-
-ax[0].set_ylabel('NDVI', fontsize = 6)
-ax[0].tick_params(axis='x', labelsize=6) 
-ax[0].tick_params(axis='y', labelsize=6) 
-
-# Second subplot
-ax[1].plot(cosmos_df["dt"], cosmos_df['cosmos_vwc'], color='black', linewidth = 0.3, zorder=1)
-ax[1].set_ylabel('Soil moisture (%)', fontsize = 6)
-ax[1].tick_params(axis='x', labelsize=6) 
-ax[1].tick_params(axis='y', labelsize=6) 
-
-sweep_lbounds_speed =  -sweep_lbounds
-sweep_ubounds_speed =  -sweep_ubounds
-speed_sweep =  -sm_sweep
-speed_sweep_ews =  -sweep_ews
-
-#third subplot
-ax[2].fill_between(cosmos_df["dt"], sweep_lbounds_speed, sweep_ubounds_speed, facecolor='lightgrey', alpha = 0.8, zorder=4)
-ax[2].plot(cosmos_df["dt"], speed_sweep, color = 'black', linestyle = 'dashed', label = 'System speed', linewidth= 0.6, zorder=5) 
-ax[2].plot(cosmos_df["dt"], speed_sweep_ews, color = 'black',  label = 'Critical slowing down', linewidth= 2, zorder=6)  
-
-ax[2].set_ylim(-0.7, 0.7)
-ax[2].legend(loc='upper right', fontsize = 6, ncol = 2)
-ax[2].set_ylabel('System speed (-AC)', fontsize = 6)
-ax[2].set_xlabel('Date', fontsize = 6)
-ax[2].tick_params(axis='x', labelsize=6) 
-ax[2].tick_params(axis='y', labelsize=6) 
-
-for ax_i in [ax[0], ax[1]]:
-    plt.setp(ax_i.get_xticklabels(), visible=False)
-    ax_i.tick_params(axis='x', which='both', bottom=False, top=False)
-
-# Save the frame
-output_gif = f"data_out/figs/gifs/time_series_static_{site_data['site_name']}.png"
-fig.savefig(output_gif, dpi=300)
-
+point_size = 3
 
 # Render time series frames sequentially
 def render_time_series_frames():

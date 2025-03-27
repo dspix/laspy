@@ -197,24 +197,7 @@ def forwardFilteringM2(Model, fs):
         'sac': sac,
         'se':se}
 
-    Y = N[1:]-np.nanmean(N) 
-    X = np.column_stack((N[:-1]-np.nanmean(N),anCLM.values[:-1])) 
 
-    Y[0] = 0
-    X[0:5, :] = 0
-
-    M = Model(Y,X,rseas,deltas)
-
-    if prior is not None:
-        M.prior = prior
-
-    FF = forwardFilteringM2(M, fs)
-
-    sm = FF.get('sm')[vid,:] # mean of autocorrelation
-    sC = FF.get('sC')[vid,vid,:] # variance of autocorrelation
-    snu = FF.get('snu') # degree of freedom
-
-    return sm, sC, snu, FF, M
 
 def run_dlm(N, anCLM, vid, fs, rseas, deltas, prior = None):
     Y = N[1:]-np.nanmean(N) 
@@ -235,3 +218,99 @@ def run_dlm(N, anCLM, vid, fs, rseas, deltas, prior = None):
     snu = FF.get('snu') # degree of freedom
 
     return sm, sC, snu, FF, M
+
+
+
+
+import numpy as np
+import scipy.linalg
+from scipy.stats import multivariate_t
+
+def forwardFilteringMultivariate(Model, fs):
+    """
+    A conceptual extension of your univariate forward filtering
+    to handle an m-dimensional dependent variable Y_t (t=1..T).
+
+    Model is assumed to have:
+      - Y: shape (T, m)
+      - X: shape (T, k)   [ optional, if you want external regressors ]
+      - prior: with m0 (p x 1), C0 (p x p) for the initial state
+      - V0: (m x m) initial guess or prior for observation covariance
+      - W0: (p x p) prior or discount-based evolution covariance
+      - G:  (p x p) or time-varying G_t for state transition
+      - maybe deltas for discount factors, etc.
+    """
+    Y = Model.Y        # shape (T, m)
+    T, m = Y.shape
+    p = Model.prior.m.shape[0]   # dimension of state
+    G = Model.G                 # shape (p x p), or time-varying
+    W = Model.W0                # shape (p x p)
+    V = Model.V0                # shape (m x m)
+
+    # Extract initial prior for the state
+    m0 = Model.prior.m          # shape (p,)
+    C0 = Model.prior.C          # shape (p, p)
+
+    # Initialize
+    m_tt = m0
+    C_tt = C0
+
+    # Storage
+    store_m = np.zeros((T, p))
+    store_C = np.zeros((T, p, p))
+    store_forecast = np.zeros((T, m))
+    store_Q = np.zeros((T, m, m))
+    store_lik = np.zeros(T)
+
+    # Forward filter
+    for t in range(T):
+        # 1) Build F_t. 
+        #    If you want a local-linear-trend for each of the two series plus 
+        #    some shared regressors, you must define it carefully. 
+        #    For example:
+        F_t = Model.build_F(t)   # shape (m x p)
+
+        # 2) Predict / prior
+        a_t = G @ m_tt
+        R_t = G @ C_tt @ G.T + W  # or discount-based version
+
+        # 3) Forecast
+        f_t = F_t @ a_t          # shape (m,)
+        Q_t = F_t @ R_t @ F_t.T + V  # shape (m x m)
+
+        # 4) Calculate forecast error
+        y_t = Y[t, :]
+        e_t = y_t - f_t          # shape (m,)
+
+        # 5) For a multivariate T-likelihood, you'll do:
+        #    a) compute scale factor, etc. 
+        #    b) evaluate pdf via e.g. 'multivariate_t.pdf(e_t, df=nu, loc=0, shape=Q_t)'
+        #    c) get your 'ac' scaling factor from Liu's formula
+        # 
+        #    For now, let's assume normal for simplicity:
+        try:
+            lik_t = scipy.stats.multivariate_normal.pdf(e_t, mean=np.zeros(m), cov=Q_t)
+        except np.linalg.LinAlgError:
+            lik_t = np.nan  # or something
+
+        # 6) Posterior update
+        #    A_t = R_t * F_t^T * Q_t^{-1}
+        #    But remember shape carefully:
+        A_t = R_t @ F_t.T @ np.linalg.inv(Q_t)   # shape (p x m)
+        m_tt = a_t + A_t @ e_t                  # shape (p,)
+        C_tt = R_t - A_t @ F_t @ R_t            # shape (p, p)
+
+        # Store
+        store_m[t, :] = m_tt
+        store_C[t, :, :] = C_tt
+        store_forecast[t, :] = f_t
+        store_Q[t, :, :] = Q_t
+        store_lik[t] = lik_t
+
+    return {
+        'm': store_m,
+        'C': store_C,
+        'forecast': store_forecast,
+        'Q': store_Q,
+        'lik': store_lik
+    }
