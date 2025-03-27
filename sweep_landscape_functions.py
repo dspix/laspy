@@ -67,7 +67,7 @@ def calculate_landscape(state_estimates, state_variances, state_1_ind, state_2_i
 
 def synth_max_wp(win_mean, win_range, wavelet, fs, n, l_period, u_period):
     """
-    Generate maximum wavelet power values from synthetic data.
+    Calculate maximum wavelet power values from synthetic data.
 
     Args:
         win_mean (np.ndarray): Array of window mean values.
@@ -131,7 +131,7 @@ def sweep_locate(
         buff
     ):
     """
-    Locate significant wavelet power regions within unfiltered data.
+    Locate significant wavelet power regions within unfiltered data over specified center and range values.
 
     Args:
         x (np.ndarray): unfiltered time series signal.
@@ -469,8 +469,7 @@ def plot_landscape(FF_sweep, warmup, dates, plot_params, file_name):
             means and covariances.
         warmup (int): Number of timesteps to exclude from the beginning.
         dates (pd.Series): Timestamps corresponding to the state estimates.
-        plot_params (list): Plotting parameters including trajectory labels and
-            annotated minima coordinates.
+        plot_params (list): Plotting parameters, site_name, label_offset_csv, [x1,y1][x2,y2] minima locations.
         file_name (str): Output filename for the saved image.
 
     Returns:

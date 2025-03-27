@@ -45,7 +45,7 @@ def calculate_bounds(sm, sC, snu, quantile):
 
 def wave_variance(x, y, fs, u_period, l_period):
   """
-  Compute coherence-power ratio (CPR) between two time series.
+  Calcualte coherence-power ratio (CPR) between two time series.
 
   Args:
       x (np.ndarray): First signal (e.g., environmental driver).
