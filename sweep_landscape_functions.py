@@ -15,19 +15,40 @@ from scipy.interpolate import griddata
 from scipy.ndimage import gaussian_filter
 from scipy.spatial.distance import cdist
 import ast
+import imageio
+
 
 def calculate_landscape(state_estimates, state_variances, state_1_ind, state_2_ind, warmup):
+    """
+    calculates a potential energy surface (stability landscape) from two selected state variables.
 
-    local_mean = state_estimates[state_1_ind, :][warmup: ]
-    ar1_resilience = state_estimates[state_2_ind, :][warmup: ]
+    Args:
+        state_estimates (np.ndarray): State estimate matrix of shape
+            (n_states, n_timesteps).
+        state_variances (np.ndarray): State variance tensor of shape
+            (n_states, n_states, n_timesteps).
+        state_1_ind (int): Index for the first state variable.
+        state_2_ind (int): Index for the second state variable.
+        warmup (int): Number of timesteps to exclude from the beginning.
 
-    local_mean_variance = state_variances[state_1_ind, state_1_ind, :][warmup: ]
-    ar1_resilience_variance = state_variances[state_2_ind, state_2_ind, :][warmup: ]
+    Returns:
+        potential (np.ndarray): 2D potential energy surface.
+        X (np.ndarray): Meshgrid X-coordinates.
+        Y (np.ndarray): Meshgrid Y-coordinates.
+        pdf (np.ndarray): Probability density function over the state space.
+        local_mean (np.ndarray): Time series of the first state variable.
+        ar1_resilience (np.ndarray): Time series of the second state variable.
+    """
+    local_mean = state_estimates[state_1_ind, :][warmup:]
+    ar1_resilience = state_estimates[state_2_ind, :][warmup:]
+
+    local_mean_variance = state_variances[state_1_ind, state_1_ind, :][warmup:]
+    ar1_resilience_variance = state_variances[state_2_ind, state_2_ind, :][warmup:]
 
     state_estimates_2d = np.vstack((local_mean, ar1_resilience))
 
-    weights = 1 / np.sqrt(local_mean_variance * ar1_resilience_variance)  # Inverse of standard deviation as weights
-
+    # Inverse of standard deviation as weights
+    weights = 1 / np.sqrt(local_mean_variance * ar1_resilience_variance)
     valid_indices = np.isfinite(local_mean) & np.isfinite(ar1_resilience) & np.isfinite(weights)
     filtered_state_estimates_2d = state_estimates_2d[:, valid_indices]
     filtered_weights = weights[valid_indices]
@@ -45,6 +66,21 @@ def calculate_landscape(state_estimates, state_variances, state_1_ind, state_2_i
     return potential, X, Y, pdf, local_mean, ar1_resilience
 
 def synth_max_wp(win_mean, win_range, wavelet, fs, n, l_period, u_period):
+    """
+    Generate maximum wavelet power values from synthetic data.
+
+    Args:
+        win_mean (np.ndarray): Array of window mean values.
+        win_range (np.ndarray): Array of window range values.
+        wavelet (str): Name of the wavelet used.
+        fs (float): Sampling frequency.
+        n (int): Number of synthetic trials.
+        l_period (float): Lower bound of target period.
+        u_period (float): Upper bound of target period.
+
+    Returns:
+        np.ndarray: Sorted array of max wavelet powers from synthetic trials.
+    """
     def process_sample(sample_ind, max_space, wavelet, fs):
         winrange_wps = np.zeros(max_space)
 
@@ -69,19 +105,80 @@ def synth_max_wp(win_mean, win_range, wavelet, fs, n, l_period, u_period):
     sample_ind = int(u_period / 2)
     max_space = len(win_mean) * len(win_range)
 
-    results = Parallel(n_jobs=-1)(delayed(process_sample)(sample_ind, max_space, wavelet, fs) for i in tqdm(range(n)))
+    results = Parallel(n_jobs=-1)(
+        delayed(process_sample)(
+            sample_ind,
+            max_space,
+            wavelet,
+            fs
+        ) for i in tqdm(range(n)))
 
     wx_sorted = np.sort(results)
 
     return wx_sorted
 
-def sweep_locate(x, win_mean, win_range, wavelet, fs, l_period, u_period, min_thresh, sig_wp, cost, buff):
+def sweep_locate(
+        x,
+        win_mean,
+        win_range,
+        wavelet,
+        fs,
+        l_period,
+        u_period,
+        min_thresh,
+        sig_wp,
+        cost,
+        buff
+    ):
+    """
+    Locate significant wavelet power regions within unfiltered data.
+
+    Args:
+        x (np.ndarray): unfiltered time series signal.
+        win_mean (np.ndarray): Array of window center values.
+        win_range (np.ndarray): Array of window half-widths.
+        wavelet (str): Name of wavelet.
+        fs (float): Sampling frequency.
+        l_period (float): Lower period threshold.
+        u_period (float): Upper period threshold.
+        min_thresh (float): Minimum signal value for masking.
+        sig_wp (float): Power threshold for significance.
+        cost (float): Weighting cost factor.
+        buff (float): Buffer added to extracted region.
+
+    Returns:
+        signal_index (dict): Indices of best-fitting window centers and ranges.
+        signal_location (dict): Locations (min, max, center) in signal space.
+        best_power (np.ndarray): Maximum power for each timestep.
+        sig_vector (np.ndarray): Boolean array indicating significant times.
+        av_power_mat (np.ndarray): Mean power across all windows.
+        power_mat (np.ndarray): Raw power matrix (mean, range, time).
+        center_mat (np.ndarray): Center axis power matrix.
+        range_mat (np.ndarray): Range axis power matrix.
+        center_mat_w (np.ndarray): Weighted center matrix.
+        range_mat_w (np.ndarray): Weighted range matrix.
+    """
     x_trim = x.copy()
     x_trim[x_trim < min_thresh] = np.nan
 
     power_mat = np.full((len(win_mean), len(win_range), len(x)), np.nan)
 
     def process_combination(i, j):
+        """
+        Computes the mean wavelet power over a window defined by the i-th mean
+        and j-th range combination in the sweep grid. Function inside parralelisation.
+
+        Args:
+            i (int): Index of the current mean in the window mean array.
+            j (int): Index of the current range in the window range array.
+
+        Returns:
+            tuple or None: (i, j, power_mat_comb) if computation is successful,
+            otherwise None.
+            - i (int): Index of the tested mean value.
+            - j (int): Index of the tested range value.
+            - power_mat_comb (np.ndarray): 1D array of mean wavelet power over time.
+        """
         mean_i = win_mean[i]
         range_j = win_range[j]
         
@@ -147,21 +244,13 @@ def sweep_locate(x, win_mean, win_range, wavelet, fs, l_period, u_period, min_th
     center_mat = np.nanmax(power_mat, axis = 1)
     range_mat = np.nanmax(power_mat, axis = 0)
 
-    #best_power = np.nanmax(center_mat, axis = 0)
     best_center_ind = np.nanargmax(center_mat, axis = 0)
     best_range_ind = np.nanargmax(range_mat, axis = 0)
 
     weighted_power_mat = power_mat.copy()
 
-    #mean_weight = cost
-    #slice_weight = 1 - cost
 
     for t in range(power_mat.shape[2]):
-        #power_mat_t = weighted_power_mat[:, :, t]
-        #slice_min = np.nanmin(power_mat_t)
-        #slice_max = np.nanmax(power_mat_t)
-        #power_mat_t_norm = (power_mat_t - slice_min) / (slice_max - slice_min)
-        #weighted_power_mat[:, :, t] = (normalized_matrix * mean_weight) + (power_mat_t_norm * slice_weight)
         weighted_power_mat[:, :, t] *= adjusted_slice
 
     #extract annual signal
@@ -175,11 +264,7 @@ def sweep_locate(x, win_mean, win_range, wavelet, fs, l_period, u_period, min_th
     loc_min = loc_mean - win_range[best_range_ind] - buff
     loc_max = loc_mean + win_range[best_range_ind] + buff
 
-    #for t in range(center_mat.shape[1]):
-    #    best_power[t] = center_mat[best_center_ind[t], t]
-
     best_power = center_mat[best_center_ind, np.arange(center_mat.shape[1])]
-    #best_power = power_mat[best_center_ind, best_range_ind, np.arange(power_mat.shape[2])]
 
     #define signal significance
     sig_vector = best_power >= sig_wp
@@ -197,7 +282,35 @@ def sweep_locate(x, win_mean, win_range, wavelet, fs, l_period, u_period, min_th
 
     return signal_index, signal_location, best_power, sig_vector, av_power_mat, power_mat, center_mat, range_mat, center_mat_w, range_mat_w
 
-def sweep_infil(signal_index, signal_location, best_power, sig_vector, av_power_mat, win_mean, win_range, buff):
+def sweep_infil(signal_index, 
+                signal_location, 
+                best_power, 
+                sig_vector, 
+                av_power_mat, 
+                win_mean, 
+                win_range, 
+                buff
+                ):
+
+    """
+    Fill gaps in detected signals for plotting, also returns significant indicies and values for plotting.
+
+    Args:
+        signal_index (dict): Dictionary of best window indices.
+        signal_location (dict): Dictionary of spatial signal boundaries.
+        best_power (np.ndarray): Power values of best signals.
+        sig_vector (np.ndarray): Boolean array indicating significant points.
+        av_power_mat (np.ndarray): Averaged power matrix.
+        win_mean (np.ndarray): Window center values.
+        win_range (np.ndarray): Window half-widths.
+        buff (float): Buffer added to extracted region.
+
+    Returns:
+        signal_index_infil (dict): Interpolated signal index values.
+        signal_index_sigonly (dict): Significant-only signal index values.
+        signal_location_infil (dict): Interpolated spatial signal bounds.
+        signal_location_sigonly (dict): Significant-only spatial bounds.
+    """
 
     best_center_ind = signal_index['ind_center']
     best_range_ind = signal_index['ind_range']
@@ -275,6 +388,23 @@ def sweep_infil(signal_index, signal_location, best_power, sig_vector, av_power_
     return signal_index_infil, signal_index_sigonly, signal_location_infil, signal_location_sigonly
 
 def sweep_extract(x, signal_location_infil, wavelet, fs, l_period, exp):
+    """
+    Extract normalized and smoothed signal from defined sweep region.
+
+    Args:
+        x (np.ndarray): Time series input.
+        signal_location_infil (dict): Dictionary with signal bounds.
+        wavelet (str): Wavelet name.
+        fs (float): Sampling frequency.
+        l_period (float): Lower cutoff period.
+        exp (float): Exponent for frequency tapering.
+
+    Returns:
+        x_sweep (np.ndarray): Final reconstructed and normalized signal.
+        wx_og (np.ndarray): Original wavelet coefficients.
+        wx_filt (np.ndarray): Frequency-filtered wavelet coefficients.
+        factor_mask (np.ndarray): Frequency-based filtering mask.
+    """
 
     loc_mean_if = signal_location_infil['loc_center']
     loc_max_if = signal_location_infil['loc_max']
@@ -324,13 +454,28 @@ def sweep_extract(x, signal_location_infil, wavelet, fs, l_period, exp):
     corr_factor = np.mean(loc_mean_if) - ((x_subset_mean + np.mean(loc_mean_if)) / 2)
 
     x_sweep -= corr_factor
-    #x_sweep += ((loc_mean_if - np.mean(loc_mean_if)) + np.mean(x_subset)) + np.mean(loc_mean_if)
 
     x_sweep[na_ind] = np.nan
 
     return x_sweep, wx_og, wx_filt, factor_mask
 
 def plot_landscape(FF_sweep, warmup, dates, plot_params, file_name):
+    """
+    Generate a 3D landscape plot showing the system trajectory over a
+    potential energy surface.
+
+    Args:
+        FF_sweep (dict): Dictionary with keys 'sm' and 'sC' containing state
+            means and covariances.
+        warmup (int): Number of timesteps to exclude from the beginning.
+        dates (pd.Series): Timestamps corresponding to the state estimates.
+        plot_params (list): Plotting parameters including trajectory labels and
+            annotated minima coordinates.
+        file_name (str): Output filename for the saved image.
+
+    Returns:
+        None. Saves a plotly figure as a png file.
+    """
 
     camera_distance = 1.75
     rotation_degree = 145
@@ -344,7 +489,12 @@ def plot_landscape(FF_sweep, warmup, dates, plot_params, file_name):
     # Light position (rotating around Z-axis)
     n = 5
 
-    potential, X, Y, pdf, local_mean, ar1_resilience = calculate_landscape(FF_sweep['sm'], FF_sweep['sC'], 0, 2, warmup)
+    potential, X, Y, pdf, local_mean, ar1_resilience = calculate_landscape(FF_sweep['sm'], 
+                                                                           FF_sweep['sC'], 
+                                                                           0, 
+                                                                           2, 
+                                                                           warmup
+                                                                           )
     dates_clip = dates[warmup: ]
 
     potential = np.sqrt(potential - np.nanmin(potential) + 1) - 1
@@ -379,8 +529,6 @@ def plot_landscape(FF_sweep, warmup, dates, plot_params, file_name):
     z_flat = potential.ravel()
 
     z_offset = 0.2
-
-    #light = LightSource(azdeg=80, altdeg=45, hsv_min_val = 0)  # Angle of the light
 
     # Prepare static surface with proper shading, lighting, and aspect ratio
     attr_surface = go.Surface(
@@ -433,29 +581,22 @@ def plot_landscape(FF_sweep, warmup, dates, plot_params, file_name):
     y_range_fixed = [y_range_full[0] - y_margin, y_range_full[1] + y_margin]
     z_range_fixed = [z_range_full[0] - z_margin, z_range_full[1] + z_margin]
 
-    axis_limits = (x_range_fixed, y_range_fixed, z_range_fixed)
-    aspect_ratio = (1, 1, 0.5)  # Specified aspect ratio
-
-    #DEFINE TIME TRAJECETORY
     time_traj = {"x": [], "y": [], "z": []}
 
-    # Precompute the full path
     for j in range(len(subsampled_local_mean)):
         x, y = subsampled_local_mean[j], subsampled_ar1_resilience[j]
         z = griddata((x_flat, y_flat), z_flat, (x, y), method="linear")
         
-        # Handle interpolation failures
         if z is None:
             z = potential.min()
 
-        # Append the current ball position to the path
         time_traj["x"].append(x)
         time_traj["y"].append(y)
-        time_traj["z"].append(z)  # Slightly elevate the path above the surface
+        time_traj["z"].append(z)  
 
-    # Path as a red line slightly above the surface
+
     path_trace = go.Scatter3d(
-        x=time_traj["x"],  # Use only the path up to the current frame
+        x=time_traj["x"],  
         y=time_traj["y"],
         z=[z + 0.2 for z in time_traj["z"]],
         mode="lines",
@@ -467,16 +608,16 @@ def plot_landscape(FF_sweep, warmup, dates, plot_params, file_name):
     start_y = time_traj["y"][0]
     start_z = time_traj["z"][0] + 0.2
 
-    # Create the square marker at the start
+
     start_marker = go.Scatter3d(
         x=[start_x],
         y=[start_y],
         z=[start_z],
         mode="markers",
         marker=dict(
-            symbol="square",  # Square marker
-            size=6,  # Adjust size as needed
-            color="red",  # Change color if desired
+            symbol="square",  
+            size=6,  
+            color="red",  
             opacity=1
         ),
         name="Start Point"
@@ -484,16 +625,16 @@ def plot_landscape(FF_sweep, warmup, dates, plot_params, file_name):
 
     frame_fig = go.Figure(data=[attr_surface, path_trace, start_marker])
 
-    # Update layout with consistent camera, aspect ratio, and formatting
+   
     frame_fig.update_layout(
         scene=dict(
             xaxis=dict(
-                title="NDVI Anomaly",  # No title
+                title="NDVI Anomaly", 
                 range=x_range_fixed,
                 tickvals = np.round(np.arange(-1, 1, 0.05), 2),
                 ticktext = np.round(np.arange(-1, 1, 0.05), 2),
                 showspikes=False,
-                showbackground=False,  # Remove background
+                showbackground=False,  
                 zeroline=True,
                 zerolinecolor="black",
                 showline=True,
@@ -502,11 +643,10 @@ def plot_landscape(FF_sweep, warmup, dates, plot_params, file_name):
                 tickcolor="black",
                 tickwidth=2,
                 gridcolor="lightgray"
-                #tickfont_size = 16,
-                #title_font_size = 16
+
             ),
             yaxis=dict(
-                title="System speed (-AC1)",  # No title
+                title="System speed (-AC1)", 
                 tickmode = "array",
                 tickvals = np.round(np.arange(-1, 1.1, 0.1), 2),
                 ticktext = -np.round(np.arange(-1, 1.1, 0.1), 2),
@@ -521,11 +661,10 @@ def plot_landscape(FF_sweep, warmup, dates, plot_params, file_name):
                 tickcolor="black",
                 tickwidth=2,
                 gridcolor="lightgray"
-                #titlefont=dict(size=16),
-                #tickfont=dict(size=16)
+
             ),
             zaxis=dict(
-                title="Potential",  # No title
+                title="Potential", 
                 range=z_range_fixed,
                 showspikes=False,
                 showbackground=False,
@@ -537,64 +676,39 @@ def plot_landscape(FF_sweep, warmup, dates, plot_params, file_name):
                 tickcolor="black",
                 tickwidth=2,
                 gridcolor="lightgray"
-                #titlefont=dict(size=16),
-                #tickfont=dict(size=16)
+
             ),
-            aspectmode="manual",  # Maintain the aspect ratio
+            aspectmode="manual", 
             aspectratio=dict(x=1, y=1, z=0.5),
             camera=dict(
-                eye=dict(x=-eye_x, y=eye_y, z=eye_z),  # Camera position
-                #eye=dict(x=0.6, y=-1.6, z=1.6 * 0.8),  # Camera position stiperstones
-                up=dict(x=1, y=0, z=1),  # "Up" direction
-                center=dict(x=0, y=0, z=0),  # Center of the view
+                eye=dict(x=-eye_x, y=eye_y, z=eye_z),  
+                up=dict(x=1, y=0, z=1),  
+                center=dict(x=0, y=0, z=0),  
             ),
         ),
-        margin=dict(l=0, r=0, t=0, b=0),  # Remove margins
-        paper_bgcolor="white",  # White background
-        plot_bgcolor="white",  # White grid
+        margin=dict(l=0, r=0, t=0, b=0), 
+        paper_bgcolor="white",  
+        plot_bgcolor="white", 
     )
 
     if isinstance(plot_params[2], str) and plot_params[2].strip():  
 
-            # Step 1: Extract time trajectory points as (x, y, z)
             time_traj_points = np.column_stack((time_traj["x"], time_traj["y"], time_traj["z"]))
-
-            # Step 2: Parse the given minima points (instead of computing lowest minima)
-            coord_string = plot_params[2]  # Example: "[1,2][3,4][5,6]"
+            coord_string = plot_params[2]  
             minima_points = np.array([ast.literal_eval(f"[{x}]") for x in coord_string.strip("][").split("][")])
-
-            # Step 3: Find the closest match in the potential grid to get z values
-            # Flatten X and Y into a (num_points, 2) shape for distance calculations
             grid_coords = np.column_stack((X.ravel(), Y.ravel()))
-
-            # Compute distances between minima_points and grid coordinates
             grid_distances = cdist(minima_points, grid_coords)
-
-            # Get the index of the closest point in the grid for each minima
             closest_grid_indices = np.argmin(grid_distances, axis=1)
-
-            # Retrieve corresponding z-values from the potential grid
             closest_grid_z = potential.ravel()[closest_grid_indices]
-
-            # Combine (x, y, z) for given minima points
             matched_minima = np.column_stack((minima_points, closest_grid_z))
-
-            # Step 4: Compute distances between these minima points and time trajectory points
-            traj_points_xy = time_traj_points[:, :2]  # Extract only (x, y)
-
-            # Compute distances
+            traj_points_xy = time_traj_points[:, :2] 
             distances = cdist(minima_points, traj_points_xy)
-
-            # Find the closest trajectory point for each minima
             closest_traj_indices = np.argmin(distances, axis=1)
-
-            # Retrieve closest trajectory points and their dates
             closest_traj_x = np.array(time_traj["x"])[closest_traj_indices]
             closest_traj_y = np.array(time_traj["y"])[closest_traj_indices]
             closest_traj_z = np.array(time_traj["z"])[closest_traj_indices]
             closest_dates = [dates_clip.iloc[j] for j in closest_traj_indices]
 
-            # Step 5: Combine results into a structured format
             results = [
                 {
                     "minima": {"x": minima[0], "y": minima[1], "z": minima[2]},
@@ -605,14 +719,12 @@ def plot_landscape(FF_sweep, warmup, dates, plot_params, file_name):
             ]
 
 
-            # Step 1: Define offsets
-            z_max_offset = potential.max() + 0.1  # Vertical height above the surface
+            z_max_offset = potential.max() + 0.1  
 
-            # Step 2: Create traces for vertical and horizontal lines and annotations
             dogleg_traces = []
             annotations = []
 
-            offset_list = list(map(float, plot_params[1].split(",")))  # Convert string to float list
+            offset_list = list(map(float, plot_params[1].split(",")))
 
             for j, result in enumerate(results):
                 # Minima coordinates
@@ -658,35 +770,30 @@ def plot_landscape(FF_sweep, warmup, dates, plot_params, file_name):
                 else:
                     xanchor_j = "right"
 
-                # Annotation for the label at the end of the horizontal line
                 annotations.append(
                     dict(
                         x=vert_x + offset_list[j],
                         y=horiz_y,
                         z=horiz_z,
-                        text=result["date"],  # Add date as label
-                        showarrow=False,  # No arrow
-                        font=dict(size=17, color="black", family="Arial"),  # Font settings
-                        xanchor=xanchor_j,  # Align text with the line end
+                        text=result["date"],
+                        showarrow=False,  
+                        font=dict(size=17, color="black", family="Arial"),  
+                        xanchor=xanchor_j,  
                         yanchor="middle",
-                        bgcolor="white",  # White background behind text
-                        opacity=0.8,  # Slight transparency to blend with background
+                        bgcolor="white",  
+                        opacity=0.8, 
                     )
                 )
 
-            # Step 3: Add traces for the lines
             for trace in dogleg_traces:
                 frame_fig.add_trace(trace)
 
-            # Step 4: Add annotations using `scene.annotations`
             frame_fig.update_layout(
                 scene=dict(
-                    annotations=annotations,  # Add annotations for the labels
+                    annotations=annotations,  
                 ),
-                margin=dict(l=0, r=0, t=0, b=0),  # Remove margins
+                margin=dict(l=0, r=0, t=0, b=0), 
             )
-
-    #glenW 210, 27, z_min = 3, x_lab = 0.1
 
     frame_fig.update_layout(showlegend=False)
     frame_fig.update_layout(
@@ -699,37 +806,41 @@ def plot_landscape(FF_sweep, warmup, dates, plot_params, file_name):
     frame_fig.write_image(frame_path, engine="kaleido", width=1080/1.5, height=960/1.5)
 
 def plot_landscape_gif(FF_sweep, warmup, dates, plot_params):
+    """
+    Generate a GIF showing system evolution on a 3D potential surface.
 
-    import numpy as np
-    import os
-    import imageio
-    from tqdm import tqdm
-    from joblib import Parallel, delayed
-    import plotly.graph_objects as go
-    from scipy.interpolate import griddata
-    from scipy.spatial.distance import cdist
-    from matplotlib.colors import LightSource
-    from scipy.ndimage import gaussian_filter
-    from scipy.ndimage import median_filter
+    Args:
+        FF_sweep (dict): Dictionary with keys 'sm' and 'sC' containing state
+            means and covariances.
+        warmup (int): Number of timesteps to exclude from the beginning.
+        dates (pd.Series): Timestamps corresponding to the state estimates.
+        plot_params (list): Plotting parameters including animation labels.
+
+    Returns:
+        None. Saves a GIF animation to file.
+    """
 
     camera_distance = 1.75
     rotation_degree = 145
     rotation_rad = np.radians(rotation_degree)
 
-    # Camera position (rotating around Z-axis)
-    eye_x = np.sin(rotation_rad) * camera_distance  # Rotates around Z-axis
+    eye_x = np.sin(rotation_rad) * camera_distance  
     eye_y = np.cos(rotation_rad) * camera_distance
-    eye_z = 1.28  # Keeping z fixed
+    eye_z = 1.28 
     
     n = 5
 
-    potential, X, Y, pdf, local_mean, ar1_resilience = PES(FF_sweep['sm'], FF_sweep['sC'], 0, 2, warmup)
+    potential, X, Y, pdf, local_mean, ar1_resilience = calculate_landscape(FF_sweep['sm'], 
+                                                                           FF_sweep['sC'], 
+                                                                           0, 
+                                                                           2, 
+                                                                           warmup
+                                                                           )
 
     potential = np.sqrt(potential - np.nanmin(potential) + 1) - 1
     potential = gaussian_filter(potential, sigma=3)
     dates_clip = dates[warmup: ]
 
-    # Subsample every nth timestep
     subsampled_local_mean = local_mean[::n]
     subsampled_ar1_resilience = ar1_resilience[::n]
     dates_clip = dates_clip[::n]
@@ -740,7 +851,7 @@ def plot_landscape_gif(FF_sweep, warmup, dates, plot_params):
             raise ValueError("Window size must be an odd number to ensure central averaging.")
 
         half_window = window_size // 2
-        smoothed = np.array(data, dtype=float)  # Ensure floating point calculations
+        smoothed = np.array(data, dtype=float)  
         result = np.copy(smoothed)
 
         for i in range(len(data)):
@@ -753,16 +864,12 @@ def plot_landscape_gif(FF_sweep, warmup, dates, plot_params):
     subsampled_local_mean = moving_average(subsampled_local_mean, window_size=31)
     subsampled_ar1_resilience = moving_average(subsampled_ar1_resilience, window_size=31)
 
-    # Create a meshgrid for X, Y, and flatten it for interpolation
     x_flat = X.ravel()
     y_flat = Y.ravel()
     z_flat = potential.ravel()
 
     z_offset = 0.2
 
-    #light = LightSource(azdeg=80, altdeg=45, hsv_min_val = 0)  # Angle of the light
-
-    # Prepare static surface with proper shading, lighting, and aspect ratio
     attr_surface = go.Surface(
         z=potential,
         x=X,
@@ -773,11 +880,11 @@ def plot_landscape_gif(FF_sweep, warmup, dates, plot_params):
         cmax=3.8,
         opacity=1,
         lighting=dict(
-            ambient=0.4,    # surface
-            diffuse=0.6,    # surface
-            specular=0.3,   # surface
-            roughness=0.5,  # surface
-            fresnel=0.1,    # surface
+            ambient=0.4,    
+            diffuse=0.6,    
+            specular=0.3,   
+            roughness=0.5,  
+            fresnel=0.1,    
         ),
         lightposition=dict(
             x=3,
@@ -794,12 +901,11 @@ def plot_landscape_gif(FF_sweep, warmup, dates, plot_params):
                 width=2,
             )
         ),
-        showscale=False,  # No color bar
+        showscale=False,  
         name="Potential Energy Surface",
     )
 
 
-    # Define fixed axis ranges with margins
     pad = 0.05
     x_range_full = [X.min(), X.max()]
     y_range_full = [Y.min(), Y.max()]
@@ -814,24 +920,23 @@ def plot_landscape_gif(FF_sweep, warmup, dates, plot_params):
     z_range_fixed = [z_range_full[0] - z_margin, z_range_full[1] + z_margin]
 
     axis_limits = (x_range_fixed, y_range_fixed, z_range_fixed)
-    aspect_ratio = (1, 1, 0.5)  # Specified aspect ratio
+    aspect_ratio = (1, 1, 0.5)  
 
-    #DEFINE TIME TRAJECETORY
+
     time_traj = {"x": [], "y": [], "z": []}
 
-    # Precompute the full path
+
     for j in range(len(subsampled_local_mean)):
         x, y = subsampled_local_mean[j], subsampled_ar1_resilience[j]
         z = griddata((x_flat, y_flat), z_flat, (x, y), method="linear")
         
-        # Handle interpolation failures
+
         if z is None:
             z = potential.min()
 
-        # Append the current ball position to the path
         time_traj["x"].append(x)
         time_traj["y"].append(y)
-        time_traj["z"].append(z + 0.3)  # Slightly elevate the path above the surface
+        time_traj["z"].append(z + 0.3)  
 
 
     dx = np.diff(time_traj["x"])
@@ -844,32 +949,6 @@ def plot_landscape_gif(FF_sweep, warmup, dates, plot_params):
 
     # Sample at regular intervals (e.g., every 5 points)
     indices = np.arange(0, len(dx), 182)
-    arrow_x = np.array(time_traj["x"])[indices]
-    arrow_y = np.array(time_traj["y"])[indices]
-    arrow_z = np.array(time_traj["z"])[indices]
-    arrow_dx = dx[indices]
-    arrow_dy = dy[indices]
-    arrow_dz = dz[indices]
-
-    # Create the arrows (cones)
-    #arrow_trace = go.Cone(
-    #x=arrow_x,
-    #y=arrow_y,
-    #z=arrow_z,
-    #u=arrow_dx,
-    #v=arrow_dy,
-    #w=arrow_dz,
-    #sizemode="absolute",
-    #sizeref=2,  # Adjust arrow size
-    #anchor="tip",
-    #colorscale=[[0, "red"], [1, "red"]],
-    #showscale=False
-    #)
-
-    #frame_fig = go.Figure(data=[attr_surface, path_trace])
-
-    #EDIT angle and light source
-    import plotly.graph_objects as go
 
     # Generate Sphere
     phi, theta = np.linspace(0, np.pi, 20), np.linspace(0, 2 * np.pi, 20)
@@ -913,15 +992,14 @@ def plot_landscape_gif(FF_sweep, warmup, dates, plot_params):
             name="Path",
         )
 
-        # Ball with consistent shading and lighting
         sphere_x, sphere_y, sphere_z = update_sphere_scaled([x, y, z + z_offset], radius_percentage, axis_limits, aspect_ratio)
         ball_trace = go.Surface(
             x=sphere_x,
             y=sphere_y,
             z=sphere_z,
-            surfacecolor=np.zeros_like(sphere_x),  # Uniform color
-            colorscale=[[0, "red"], [1, "red"]],  # Fixed red color
-            showscale=False,  # No color bar
+            surfacecolor=np.zeros_like(sphere_x),  
+            colorscale=[[0, "red"], [1, "red"]], 
+            showscale=False, 
             lighting=dict(
                 ambient=0.7,
                 diffuse=0.2,
@@ -995,7 +1073,6 @@ def plot_landscape_gif(FF_sweep, warmup, dates, plot_params):
                 aspectratio=dict(x=1, y=1, z=0.5),
                 camera=dict(
                     eye=dict(x=-eye_x, y=eye_y, z=eye_z),  # Camera position
-                    #eye=dict(x=0.6, y=-1.6, z=1.6 * 0.8),  # Camera position stiperstones
                     up=dict(x=1, y=0, z=1),  # "Up" direction
                     center=dict(x=0, y=0, z=0),  # Center of the view
                 ),
@@ -1037,41 +1114,3 @@ def plot_landscape_gif(FF_sweep, warmup, dates, plot_params):
 
     print(f"GIF saved at: {output_gif}")
 
-
-def create_stl():
-
-    
-    #CODE FOR STL
-
-    x = np.arange(potential.shape[0])
-    y = np.arange(potential.shape[1])
-    x, y = np.meshgrid(x, y)
-    z = potential  # Height values
-
-    # Create the faces of the mesh
-    faces = []
-    for i in range(potential.shape[0] - 1):
-        for j in range(potential.shape[1] - 1):
-            # Define the four corner points of the cell
-            v0 = [x[i, j], y[i, j], z[i, j]]
-            v1 = [x[i + 1, j], y[i + 1, j], z[i + 1, j]]
-            v2 = [x[i, j + 1], y[i, j + 1], z[i, j + 1]]
-            v3 = [x[i + 1, j + 1], y[i + 1, j + 1], z[i + 1, j + 1]]
-
-            # Define two triangles per grid cell
-            faces.append([v0, v1, v2])
-            faces.append([v1, v3, v2])
-
-    # Convert faces to numpy array
-    faces = np.array(faces)
-
-    # Create the mesh
-    surface_mesh = mesh.Mesh(np.zeros(faces.shape[0], dtype=mesh.Mesh.dtype))
-    for i, f in enumerate(faces):
-        for j in range(3):
-            surface_mesh.vectors[i][j] = f[j]
-        
-    # Save the STL file
-    stl_dir = "data_out/stl"
-    frame_path = os.path.join(stl_dir, f"surface_{site_data['site_name']}.stl")
-    surface_mesh.save(frame_path)
