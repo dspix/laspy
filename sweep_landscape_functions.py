@@ -11,17 +11,18 @@ from statsmodels.nonparametric.smoothers_lowess import lowess
 from scipy.stats import gaussian_kde
 
 def PES(state_estimates, state_variances, state_1_ind, state_2_ind, warmup):
+    """Docstring...
+    """
+    local_mean = state_estimates[state_1_ind, :][warmup:]
+    ar1_resilience = state_estimates[state_2_ind, :][warmup:]
 
-    local_mean = state_estimates[state_1_ind, :][warmup: ]
-    ar1_resilience = state_estimates[state_2_ind, :][warmup: ]
-
-    local_mean_variance = state_variances[state_1_ind, state_1_ind, :][warmup: ]
-    ar1_resilience_variance = state_variances[state_2_ind, state_2_ind, :][warmup: ]
+    local_mean_variance = state_variances[state_1_ind, state_1_ind, :][warmup:]
+    ar1_resilience_variance = state_variances[state_2_ind, state_2_ind, :][warmup:]
 
     state_estimates_2d = np.vstack((local_mean, ar1_resilience))
 
-    weights = 1 / np.sqrt(local_mean_variance * ar1_resilience_variance)  # Inverse of standard deviation as weights
-
+    # Inverse of standard deviation as weights
+    weights = 1 / np.sqrt(local_mean_variance * ar1_resilience_variance)
     valid_indices = np.isfinite(local_mean) & np.isfinite(ar1_resilience) & np.isfinite(weights)
     filtered_state_estimates_2d = state_estimates_2d[:, valid_indices]
     filtered_weights = weights[valid_indices]
@@ -38,9 +39,9 @@ def PES(state_estimates, state_variances, state_1_ind, state_2_ind, warmup):
 
     return potential, X, Y, pdf, local_mean, ar1_resilience
 
-
-
 def synth_max_wp(win_mean, win_range, wavelet, fs, n, l_period, u_period):
+    """
+    """
     def process_sample(sample_ind, max_space, wavelet, fs):
         winrange_wps = np.zeros(max_space)
 
@@ -65,19 +66,66 @@ def synth_max_wp(win_mean, win_range, wavelet, fs, n, l_period, u_period):
     sample_ind = int(u_period / 2)
     max_space = len(win_mean) * len(win_range)
 
-    results = Parallel(n_jobs=-1)(delayed(process_sample)(sample_ind, max_space, wavelet, fs) for i in tqdm(range(n)))
+    results = Parallel(n_jobs=-1)(
+        delayed(process_sample)(
+            sample_ind,
+            max_space,
+            wavelet,
+            fs
+        ) for i in tqdm(range(n)))
 
     wx_sorted = np.sort(results)
 
     return wx_sorted
 
-def sweep_locate(x, win_mean, win_range, wavelet, fs, l_period, u_period, min_thresh, sig_wp, cost, buff):
+def sweep_locate(
+        x,
+        win_mean,
+        win_range,
+        wavelet,
+        fs,
+        l_period,
+        u_period,
+        min_thresh,
+        sig_wp,
+        cost,
+        buff
+    ):
+    """Locates the signal envelope from unfiltered input data.
+
+    Args:
+        x: input numpy array.
+        win_mean:
+        win_range:
+        wavelet:
+        fs:
+        l_period:
+        u_period:
+        min_thresh:
+        sig_wp:
+        cost:
+        buff:
+
+    Returns:
+        signal_index:.
+        signal_location:.
+        best_power:.
+        sig_vector:.
+        av_power_mat:.
+        power_mat:.
+        center_mat:.
+        range_mat:.
+        center_mat_w:.
+        range_mat_w:.
+    """
     x_trim = x.copy()
     x_trim[x_trim < min_thresh] = np.nan
 
     power_mat = np.full((len(win_mean), len(win_range), len(x)), np.nan)
 
     def process_combination(i, j):
+        """
+        """
         mean_i = win_mean[i]
         range_j = win_range[j]
         
