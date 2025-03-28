@@ -12,6 +12,7 @@ from scipy.stats import t as tdstr
 import ssqueezepy as ssq   
 from ssqueezepy.experimental import scale_to_freq
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+import matplotlib.ticker as mticker
 
 def expand_to_df(dict_of_feats):
   df = pd.DataFrame(dict_of_feats)
@@ -78,7 +79,11 @@ def wave_variance(x, y, fs, u_period, l_period):
   y[np.where(np.isnan(y))] = np.mean(y[~np.isnan(y)])
 
   wavelet_mother=wavelet.Morlet(6)
-  WCT, phase, coi, freq, *_ = wct(x, y, 1, 1/10, s0=-1, J=-1, sig=False, significance_level=0.95, wavelet=wavelet_mother, normalize=True)
+  WCT, phase, coi, freq, *_ = wct(
+      x, y, 1, 1/10, s0=-1, J=-1, 
+      sig=False, significance_level=0.95,
+      wavelet=wavelet_mother, normalize=True
+      )
   
   periods = 1 / freq
   period_indices = np.where((periods >= l_period/fs) & (periods <= u_period/fs))[0]
@@ -89,7 +94,7 @@ def wave_variance(x, y, fs, u_period, l_period):
   power_x[:, ~x_nan] = np.nan
   phase[:, ~x_nan] = np.nan
 
-  #coherence measures correlation irrespective of power - so can be misleading as all powers may not contribute
+  # Coherence measures correlation irrespective of power - so can be misleading as all powers may not contribute
   coherence_power = np.nansum(WCT[period_indices, :] * power_x[period_indices, :], axis=0)
   total_power = np.nansum(power_x[period_indices, :], axis=0)
 
@@ -110,7 +115,9 @@ def wave_variance(x, y, fs, u_period, l_period):
   def phase_to_day(phase, period):
       return (np.abs(phase) / np.pi) * (period / 2)
 
-  mean_phase_day = (phase_to_day(ann_angles, annual) + phase_to_day(sub_angles, half_annual)) / 2
+  mean_phase_day = ((phase_to_day(ann_angles, annual)
+                     + phase_to_day(sub_angles, half_annual))
+                     / 2)
 
   return WCT, wav_coh, wav_r2, mean_phase, mean_phase_day
 
@@ -155,7 +162,7 @@ def plot_dlm_results(daily_dates, x_sweep, sig_vector, comp_dates,
     Args:
         daily_dates (pd.Series): Dates for daily SWEEP NDVI.
         x_sweep (np.ndarray): SWEEP NDVI values.
-        sig_vector (np.ndarray): Boolean mask for statistically significant SWEEP values.
+        sig_vector (np.ndarray): Boolean mask for significant SWEEP values.
         comp_dates (pd.Series): Dates for MODIS composite NDVI.
         ndvi_comp (np.ndarray): MODIS composite NDVI values.
         cosmos_vwc (np.ndarray): Volumetric water content time series.
@@ -478,21 +485,20 @@ def plot_sweep_extract(daily_dates, x, x_sweep, signal_location_infil,
     levels = np.linspace(np.min(np.abs(wx_og)), np.max(np.abs(wx_og)), 10)
 
     #plot ndvi series
-    ax[0, 0].scatter(daily_dates, x, c="lightgrey",  label="MOD09GQ", s = point_size)
-    ax[0, 0].scatter(daily_dates, x_masked, c="black",  label="Phenology envelope", s = point_size)
+    ax[0, 0].scatter(daily_dates, x, c="lightgrey",  label="MOD09GQ", s=point_size)
+    ax[0, 0].scatter(daily_dates, x_masked, c="black",  label="Phenology envelope", s=point_size)
     ax[0, 0].set_ylabel('Enveloped NDVI', fontsize = 6)
 
-    ax[1, 0].scatter(daily_dates, x, c="lightgrey",  label="MOD09GQ", s = point_size)
-    ax[1, 0].scatter(daily_dates, x_sweep, c="black",  label="Sweep phenology", s = point_size)
-    ax[1, 0].set_xlabel('Year', fontsize = 6)
+    ax[1, 0].scatter(daily_dates, x, c="lightgrey",  label="MOD09GQ", s=point_size)
+    ax[1, 0].scatter(daily_dates, x_sweep, c="black",  label="Sweep phenology", s=point_size)
+    ax[1, 0].set_xlabel('Year', fontsize=6)
     ax[1, 0].set_ylabel('Noise-supressed NDVI', fontsize = 6)
 
-    ax[0, 1].contourf(np.abs(wx_og), aspect = 'auto', levels = levels, cmap = grey_cmap)
+    ax[0, 1].contourf(np.abs(wx_og), levels=levels, cmap=grey_cmap)
     ax[0, 1].axhline(y=np.argmin(np.abs(l_period - periods)), color='black', linestyle='--', linewidth=0.6)
     ax[0, 1].set_yticks(indices, labels)
-
     
-    contour = ax[1, 1].contourf(np.abs(wx_filt), aspect = 'auto', levels = levels, cmap = grey_cmap)
+    contour = ax[1, 1].contourf(np.abs(wx_filt), levels = levels, cmap = grey_cmap)
     ax[1, 1].axhline(y=np.argmin(np.abs(l_period - periods)), color='black', linestyle='--', linewidth=0.6)
     ax[1, 1].set_yticks(indices, labels)
     ax[1, 1].set_xticks(year_labels.iloc[[0, -1]].index)
@@ -527,6 +533,7 @@ def plot_sweep_extract(daily_dates, x, x_sweep, signal_location_infil,
     ax[1, 2].set_ylim(0, wx_filt.shape[0])
     ax[1, 2].set_xlabel('Av. Power', fontsize = 6)
     ticks = ax[1, 2].get_xticks()
+    ax[1, 2].xaxis.set_major_locator(mticker.FixedLocator(ticks))
     ax[1, 2].set_xticklabels([f'{tick:.1f}' for tick in ticks])
     ax[1, 2].set_ylabel('Period (years)', fontsize = 6)
     ax[1, 2].yaxis.set_label_position("right")

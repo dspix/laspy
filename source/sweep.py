@@ -1,197 +1,184 @@
-from datetime import datetime
-import scipy.linalg
-from scipy.stats import t as tdstr
-from scipy.stats import norm
-from scipy.interpolate import interp1d
-from datetime import date, datetime, timedelta
-from dateutil.relativedelta import relativedelta
-import matplotlib
-matplotlib.rc('font', size=14)
-import matplotlib.pyplot as plt
-from joblib import Parallel, delayed
-
+import numpy as np
+import pandas as pd
+import ssqueezepy as ssq
 from scipy import stats
+from ssqueezepy.experimental import scale_to_freq
+from joblib import Parallel, delayed
+import random
+import math
 from tqdm import tqdm
 from statsmodels.nonparametric.smoothers_lowess import lowess
-import ssqueezepy as ssq
-from ssqueezepy.experimental import scale_to_freq
-#from wavelet_functions import ssq_cwt_sig
+from scipy.stats import gaussian_kde
+import os
+import plotly.graph_objects as go
+from scipy.interpolate import griddata
+from scipy.ndimage import gaussian_filter
+from scipy.spatial.distance import cdist
+import ast
+import imageio
 
-import pandas as pd
-import numpy as np
-from scipy import signal
+def calculate_landscape(state_estimates, state_variances, state_1_ind, state_2_ind, warmup):
+    """Calculates a potential energy surface (stability landscape) from 
+    two selected state variables.
 
+    Args:
+        state_estimates (np.ndarray): State estimate matrix of shape
+            (n_states, n_timesteps).
+        state_variances (np.ndarray): State variance tensor of shape
+            (n_states, n_states, n_timesteps).
+        state_1_ind (int): Index for the first state variable.
+        state_2_ind (int): Index for the second state variable.
+        warmup (int): Number of timesteps to exclude from the beginning.
 
-def normalize_vector(v):
-    min_v = np.min(v)
-    max_v = np.max(v)
-    if max_v == min_v:
-        return np.zeros_like(v)
-    return (v - min_v) / (max_v - min_v)
+    Returns:
+        potential (np.ndarray): 2D potential energy surface.
+        X (np.ndarray): Meshgrid X-coordinates.
+        Y (np.ndarray): Meshgrid Y-coordinates.
+        pdf (np.ndarray): Probability density function over the state space.
+        local_mean (np.ndarray): Time series of the first state variable.
+        ar1_resilience (np.ndarray): Time series of the second state variable.
+    """
+    local_mean = state_estimates[state_1_ind, :][warmup:]
+    ar1_resilience = state_estimates[state_2_ind, :][warmup:]
 
+    local_mean_variance = state_variances[state_1_ind, state_1_ind, :][warmup:]
+    ar1_resilience_variance = state_variances[state_2_ind, state_2_ind, :][warmup:]
 
-#WAVELT FUNCTIONS
+    state_estimates_2d = np.vstack((local_mean, ar1_resilience))
 
-def ssq_cwt_sig(x_in, wavelet, fs, n, sig_lvl):
-    X = pd.Series(x_in)
-    X = stats.zscore(X)
-    ar1 = X.autocorr(lag=1)
-    
-    wx_og, scales_og, *_ = ssq.cwt(X.values.ravel(), wavelet, fs=fs)
-    wx_sur = np.zeros((wx_og.shape[0], wx_og.shape[1], n))
-    freqs = scale_to_freq(scales_og, wavelet, len(x_in), fs=fs)
-    periods = 1 / freqs
-    
-    length = len(X)
-    
-    for i in tqdm(range(n)):
-        # Generate synthetic series using AR(1) process
-        synthetic_series = np.random.normal(size=length)
-        for j in range(1, length):
-            synthetic_series[j] += ar1 * synthetic_series[j - 1]
-        
-        synthetic_series = stats.zscore(synthetic_series)
-        wx_i, *_ = ssq.cwt(synthetic_series, wavelet, fs=fs)
-        wx_sur[:, :, i] = np.abs(wx_i)
-    
-    p_values = np.sum(wx_sur > np.abs(wx_og[:, :, np.newaxis]), axis=2) / n
-    sig_mat = p_values < sig_lvl
-    
-    return wx_og, periods, scales_og, p_values, sig_mat
+    # Inverse of standard deviation as weights
+    weights = 1 / np.sqrt(local_mean_variance * ar1_resilience_variance)
+    valid_indices = np.isfinite(local_mean) & np.isfinite(ar1_resilience) & np.isfinite(weights)
+    filtered_state_estimates_2d = state_estimates_2d[:, valid_indices]
+    filtered_weights = weights[valid_indices]
 
+    kde = gaussian_kde(filtered_state_estimates_2d, weights=filtered_weights)
+    xmin, ymin = filtered_state_estimates_2d.min(axis=1)
+    xmax, ymax = filtered_state_estimates_2d.max(axis=1)
+    X, Y = np.mgrid[xmin:xmax:100j, ymin:ymax:100j]
+    positions = np.vstack([X.ravel(), Y.ravel()])
+    pdf = np.reshape(kde(positions).T, X.shape)
 
-""" def ssq_cwt_sig(x_in, wavelet, fs, n, sig_lvl):
-     
-    import pandas as pd
-    import numpy as np
-    from ssqueezepy.experimental import scale_to_freq
-    from scipy import stats
-    import ssqueezepy as ssq
-    from scipy import signal
-    from tqdm import tqdm
+    # Potential function: V(x) = -ln(P(x))
+    potential = -np.log(pdf + 1e-10)  # Add a small value to avoid log(0)
 
-    X = pd.Series(x_in)
-    X = stats.zscore(X)
-    ar1 = X.autocorr(lag=1)
-    
-    wx_og, scales_og, *_ = ssq.cwt(X.values.ravel(), wavelet, fs=fs)
-    #wx_og = np.abs(wx_og)#**2
-    wx_sur = np.zeros((wx_og.shape[0], wx_og.shape[1], n))
-    freqs = scale_to_freq(scales_og, wavelet, len(x_in), fs=fs)
-    periods = 1/freqs
-    
-    for i in tqdm(range(n)):
-        length = len(X)
-        synthetic_series = np.zeros(length)
-        synthetic_series[0] = np.random.normal()  # Initial value
-        
-        for j in range(1, length):
-            synthetic_series[j] = ar1 * synthetic_series[j-1] + np.random.normal()
-        
-        synthetic_series = stats.zscore(synthetic_series)
-        wx_i, *_ = ssq.cwt(synthetic_series, wavelet, fs=fs)
-        wx_sur[:,:,i] = np.abs(wx_i)#**2
-    
-    p_values = np.sum(wx_sur > np.abs(wx_og[:, :, np.newaxis]), axis = 2) / n
-    sig_mat = p_values < sig_lvl
-    
-    return wx_og, periods, scales_og, p_values, sig_mat """
+    return potential, X, Y, pdf, local_mean, ar1_resilience
 
-#WAVELETCOMP R PACKAGE TRANSFORM CODE##############
-def wc_cwt_morlet(x, dt=1, dj=1/20, lowerPeriod=None, upperPeriod=None):
-    
-    import numpy as np
-    from scipy.fftpack import fft, ifft
-    from scipy.signal import detrend
+def synth_max_wp(win_mean, win_range, wavelet, fs, n, l_period, u_period):
+    """
+    Calculate maximum wavelet power values from synthetic data.
 
-    if lowerPeriod is None:
-        lowerPeriod = 2 * dt
-    if upperPeriod is None:
-        upperPeriod = int(np.floor(len(x) * dt / 3))
+    Args:
+        win_mean (np.ndarray): Array of window mean values.
+        win_range (np.ndarray): Array of window range values.
+        wavelet (str): Name of the wavelet used.
+        fs (float): Sampling frequency.
+        n (int): Number of synthetic trials.
+        l_period (float): Lower bound of target period.
+        u_period (float): Upper bound of target period.
 
-    series_length = len(x)
-    pot2 = int(np.log2(series_length) + 0.5)
-    pad_length = 2**(pot2 + 1) - series_length
-    omega0 = 6
-    fourier_factor = (2 * np.pi) / omega0
-    min_scale = lowerPeriod / fourier_factor
-    max_scale = upperPeriod / fourier_factor
-    J = int(np.log2(max_scale / min_scale) / dj)
-    scales = min_scale * 2**(np.arange(0, J + 1) * dj)
-    scales_length = len(scales)
-    periods = fourier_factor * scales
-    N = series_length + pad_length
-    omega_k = np.arange(1, N // 2 + 1)
-    omega_k = omega_k * (2 * np.pi) / (N * dt)
-    omega_k = np.concatenate(([0], omega_k, -omega_k[int(np.floor((N - 1) / 2)) - 1::-1]))
+    Returns:
+        np.ndarray: Sorted array of max wavelet powers from synthetic trials.
+    """
+    def process_sample(sample_ind, max_space, wavelet, fs):
+        winrange_wps = np.zeros(max_space)
 
-    def morlet_wavelet_transform(x):
-        st = np.std(x, ddof=1)
-        x = (x - np.mean(x)) / st # Remove the mean and trend
-        xpad = np.concatenate((x, np.zeros(pad_length)))
-        fft_xpad = fft(xpad, axis=0)
-        wave = np.zeros((scales_length, N), dtype=np.complex_)
-        
-        for ind_scale in range(scales_length):
-            my_scale = scales[ind_scale]
-            norm_factor = np.pi**(1/4) * np.sqrt(2 * my_scale / dt)
-            expnt = -((my_scale * omega_k - omega0)**2 / 2) * (omega_k > 0)
-            daughter = norm_factor * np.exp(expnt)
-            daughter = daughter * (omega_k > 0)
-            wave[ind_scale, :] = ifft(fft_xpad * daughter, axis=0) / N
+        for j in range(max_space):
+            synthetic_series = np.random.normal(size = math.ceil(u_period))
 
-        wave = wave[:, :series_length]
-        return wave
+            n_nan = math.floor(0 * len(synthetic_series))
+            nan_indices = random.sample(range(len(synthetic_series)), n_nan)
+            synthetic_series[nan_indices] = 0
+            wx_i, scales, *_ = ssq.cwt(synthetic_series, wavelet, fs=fs)
+            freqs = scale_to_freq(scales, wavelet, len(synthetic_series), fs=fs)
+            periods = 1 / freqs
 
-    Wave = morlet_wavelet_transform(x)
-    Power = np.abs(Wave)**2 / np.tile(scales, (series_length, 1)).T
-    Phase = np.angle(Wave)
-    Ampl = np.abs(Wave) / np.tile(np.sqrt(scales), (series_length, 1)).T
+            wx_slice = wx_i[:, sample_ind]
 
-    return Wave, Phase, Ampl, periods, scales, Power
+            p_ind = np.where((periods <= u_period) & (periods >= l_period))[0]
+            wx_p = wx_slice[p_ind]
+            winrange_wps[j] = np.nanmean(np.abs(wx_p))
 
+        return np.nanmax(winrange_wps)
 
-def wc_rec(wx, scales, dt, dj, nr, nc):
+    sample_ind = int(u_period / 2)
+    max_space = len(win_mean) * len(win_range)
 
-    import numpy as np
+    results = Parallel(n_jobs=-1)(
+        delayed(process_sample)(
+            sample_ind,
+            max_space,
+            wavelet,
+            fs
+        ) for i in tqdm(range(n)))
 
-    rec_waves = np.zeros((nr, nc))
-    
-    for s_ind in range(nr):
-        rec_waves[s_ind, :] = (np.real(wx[s_ind, :]) / np.sqrt(scales[s_ind])) * dj * np.sqrt(dt) / (np.pi**(-1/4) * 0.776)
+    wx_sorted = np.sort(results)
 
-    x_r = np.nansum(rec_waves, axis=0)
-    return(x_r)
+    return wx_sorted
 
+def sweep_locate(
+        x,
+        win_mean,
+        win_range,
+        wavelet,
+        fs,
+        l_period,
+        u_period,
+        min_thresh,
+        sig_wp,
+        cost,
+        buff
+    ):
+    """Locate significant wavelet power regions within 
+    unfiltered data over specified center and range values.
 
-#SWEEP FUNCTIONS##############
-def extract_ind(results_mat):
+    Args:
+        x (np.ndarray): unfiltered time series signal.
+        win_mean (np.ndarray): Array of window center values.
+        win_range (np.ndarray): Array of window half-widths.
+        wavelet (str): Name of wavelet.
+        fs (float): Sampling frequency.
+        l_period (float): Lower period threshold.
+        u_period (float): Upper period threshold.
+        min_thresh (float): Minimum signal value for masking.
+        sig_wp (float): Power threshold for significance.
+        cost (float): Weighting cost factor.
+        buff (float): Buffer added to extracted region.
 
-    row_out = []
-    col_out = []
-    for i in range(results_mat.shape[2]):
-
-        mat_i = results_mat[:,:,i]
-        mat_i[np.isnan(mat_i)] = -np.inf
-        #mat_i = np.where((mat_i < min_val) | (mat_i > max_val), mat_i, -np.inf)
-        max_val = np.max(mat_i, axis=None)
-        max_indices = np.transpose(np.where(mat_i == max_val))
-        max_indices_sorted = sorted(max_indices, key=lambda x: x[1])
-        ind_i = max_indices_sorted[0]
-
-        row_out.append(ind_i[0])
-        col_out.append(ind_i[1])
-        
-    df = pd.DataFrame({'mean_i': row_out, 'range_i': col_out})   
-    return df
-
-def sweep_locate(x, win_mean, win_range, wavelet, fs, l_period, u_period, min_thresh, sig_wp, cost):
+    Returns: 
+        dict: Dictionary containing:
+        - signal_index (dict): Indices of best-fitting window centers and ranges.
+        - signal_location (dict): Locations (min, max, center) in signal space.
+        - best_power (np.ndarray): Maximum power for each timestep.
+        - sig_vector (np.ndarray): Boolean array indicating significant times.
+        - av_power_mat (np.ndarray): Mean power across all windows.
+        - power_mat (np.ndarray): Raw power matrix (mean, range, time).
+        - center_mat (np.ndarray): Center axis power matrix.
+        - range_mat (np.ndarray): Range axis power matrix.
+        - center_mat_w (np.ndarray): Weighted center matrix.
+        - range_mat_w (np.ndarray): Weighted range matrix.
+    """
     x_trim = x.copy()
     x_trim[x_trim < min_thresh] = np.nan
 
     power_mat = np.full((len(win_mean), len(win_range), len(x)), np.nan)
 
     def process_combination(i, j):
+        """
+        Computes the mean wavelet power over a window defined by the i-th mean
+        and j-th range combination in the sweep grid. Function inside parralelisation.
+
+        Args:
+            i (int): Index of the current mean in the window mean array.
+            j (int): Index of the current range in the window range array.
+
+        Returns:
+            tuple or None: (i, j, power_mat_comb) if computation is successful,
+            otherwise None.
+            - i (int): Index of the tested mean value.
+            - j (int): Index of the tested range value.
+            - power_mat_comb (np.ndarray): 1D array of mean wavelet power over time.
+        """
         mean_i = win_mean[i]
         range_j = win_range[j]
         
@@ -231,8 +218,6 @@ def sweep_locate(x, win_mean, win_range, wavelet, fs, l_period, u_period, min_th
         freqs = scale_to_freq(scales, wavelet, len(x_subset), fs=fs)
         periods = 1/freqs
 
-        power_mat_comb = np.full((len(x), len(nseas)), np.nan)
-
         wx_rec = wx.copy()
         mask = (periods <= u_period) & (periods >= l_period)
         wx_rec[~mask, :] = np.nan
@@ -241,7 +226,9 @@ def sweep_locate(x, win_mean, win_range, wavelet, fs, l_period, u_period, min_th
         
         return i, j, power_mat_comb
 
-    results = Parallel(n_jobs=-1)(delayed(process_combination)(i, j) for i in range(power_mat.shape[0]) for j in range(power_mat.shape[1]))
+    results = Parallel(n_jobs=-1)(
+        delayed(process_combination)(i, j) for i in range(power_mat.shape[0]) for j in range(power_mat.shape[1])
+        )
 
     for res in results:
         if res is not None:
@@ -259,11 +246,11 @@ def sweep_locate(x, win_mean, win_range, wavelet, fs, l_period, u_period, min_th
     center_mat = np.nanmax(power_mat, axis = 1)
     range_mat = np.nanmax(power_mat, axis = 0)
 
-    #best_power = np.nanmax(center_mat, axis = 0)
     best_center_ind = np.nanargmax(center_mat, axis = 0)
     best_range_ind = np.nanargmax(range_mat, axis = 0)
 
     weighted_power_mat = power_mat.copy()
+
 
     for t in range(power_mat.shape[2]):
         weighted_power_mat[:, :, t] *= adjusted_slice
@@ -278,9 +265,6 @@ def sweep_locate(x, win_mean, win_range, wavelet, fs, l_period, u_period, min_th
     loc_mean = win_mean[best_center_ind] 
     loc_min = loc_mean - win_range[best_range_ind] - buff
     loc_max = loc_mean + win_range[best_range_ind] + buff
-
-    #for t in range(center_mat.shape[1]):
-    #    best_power[t] = center_mat[best_center_ind[t], t]
 
     best_power = center_mat[best_center_ind, np.arange(center_mat.shape[1])]
 
@@ -298,9 +282,50 @@ def sweep_locate(x, win_mean, win_range, wavelet, fs, l_period, u_period, min_th
         'loc_max': loc_max
     }
 
-    return signal_index, signal_location, best_power, sig_vector, av_power_mat, power_mat, center_mat, range_mat
+    return {
+        'signal_index': signal_index,
+        'signal_location': signal_location,
+        'best_power': best_power,
+        'sig_vector': sig_vector,
+        'av_power_mat': av_power_mat,
+        'power_mat': power_mat,
+        'center_mat': center_mat,
+        'range_mat': range_mat,
+        'center_mat_w': center_mat_w,
+        'range_mat_w': range_mat_w 
+    }
 
-def infil_signal(signal_index, signal_location, best_power, sig_vector, av_power_mat):
+def sweep_infil(
+    signal_index, 
+    signal_location, 
+    best_power, 
+    sig_vector, 
+    av_power_mat, 
+    win_mean, 
+    win_range, 
+    buff
+    ):
+
+    """Fill gaps in detected signals for plotting, also returns significant 
+    indicies and values for plotting.
+
+    Args:
+        signal_index (dict): Dictionary of best window indices.
+        signal_location (dict): Dictionary of spatial signal boundaries.
+        best_power (np.ndarray): Power values of best signals.
+        sig_vector (np.ndarray): Boolean array indicating significant points.
+        av_power_mat (np.ndarray): Averaged power matrix.
+        win_mean (np.ndarray): Window center values.
+        win_range (np.ndarray): Window half-widths.
+        buff (float): Buffer added to extracted region.
+
+    Returns:
+        dict: Dictionary containing:
+        - signal_index_infil (dict): Interpolated signal index values.
+        - signal_index_sigonly (dict): Significant-only signal index values.
+        - signal_location_infil (dict): Interpolated spatial signal bounds.
+        - signal_location_sigonly (dict): Significant-only spatial bounds.
+    """
 
     best_center_ind = signal_index['ind_center']
     best_range_ind = signal_index['ind_range']
@@ -338,8 +363,10 @@ def infil_signal(signal_index, signal_location, best_power, sig_vector, av_power
     av_range_ind = np.nanargmax(av_range_mat)
 
     loc_mean_if[np.isnan(loc_mean_if)] = win_mean[av_center_ind] 
-    loc_min_if[np.isnan(loc_min_if)] = loc_mean_if[np.isnan(loc_min_if)] - win_range[av_range_ind] - buff
-    loc_max_if[np.isnan(loc_max_if)] = loc_mean_if[np.isnan(loc_max_if)] + win_range[av_range_ind] + buff
+    loc_min_if[np.isnan(loc_min_if)] = (loc_mean_if[np.isnan(loc_min_if)]
+                                        - win_range[av_range_ind] - buff)
+    loc_max_if[np.isnan(loc_max_if)] = (loc_mean_if[np.isnan(loc_max_if)]
+                                        + win_range[av_range_ind] + buff)
 
     best_center_ind_if = best_center_ind.copy() 
     best_center_ind_if = best_center_ind_if.astype('float')
@@ -375,9 +402,47 @@ def infil_signal(signal_index, signal_location, best_power, sig_vector, av_power
         'loc_max': loc_max_sig
     }
 
-    return signal_index_infil, signal_index_sigonly, signal_location_infil, signal_location_sigonly
+    return {
+        'signal_index_infil': signal_index_infil,
+        'signal_index_sigonly': signal_index_sigonly,
+        'signal_location_infil': signal_location_infil,
+        'signal_location_sigonly': signal_location_sigonly
+        }
 
-def sweep_extract(x_subset, wavelet, fs, l_period, exp):
+def sweep_extract(x, signal_location_infil, wavelet, fs, l_period, exp):
+    """ Extract normalized and smoothed signal from defined sweep region.
+
+    Args:
+        x (np.ndarray): Time series input.
+        signal_location_infil (dict): Dictionary with signal bounds.
+        wavelet (str): Wavelet name.
+        fs (float): Sampling frequency.
+        l_period (float): Lower cutoff period.
+        exp (float): Exponent for frequency tapering.
+
+    Returns:
+        x_sweep (np.ndarray): Final reconstructed and normalized signal.
+        wx_og (np.ndarray): Original wavelet coefficients.
+        wx_filt (np.ndarray): Frequency-filtered wavelet coefficients.
+        factor_mask (np.ndarray): Frequency-based filtering mask.
+    """
+
+    loc_mean_if = signal_location_infil['loc_center']
+    loc_max_if = signal_location_infil['loc_max']
+    loc_min_if = signal_location_infil['loc_min']
+    loc_env_if = loc_max_if - loc_min_if
+
+    x_subset = x.copy()
+    na_ind = (x_subset > loc_max_if) | (x_subset < loc_min_if)
+    x_subset[na_ind] = np.nan
+
+    x_subset = pd.Series(x_subset).interpolate(method='linear', limit_direction='both').values
+    x_subset[np.where(np.isnan(x_subset))] = np.mean(x_subset[~np.isnan(x_subset)])
+
+    x_subset_mean = np.nanmean(x_subset)
+
+    x_subset -= loc_mean_if
+    x_subset /= loc_env_if
 
     X = stats.zscore(x_subset)
     wx_og, scales, *_ = ssq.cwt(X, wavelet, fs=fs)
@@ -387,407 +452,709 @@ def sweep_extract(x_subset, wavelet, fs, l_period, exp):
     lower_ind = np.argmin(np.abs(periods - l_period))
     factor_mask = np.ones((wx_og.shape[0], wx_og.shape[1]), dtype='float')
 
+    def normalize_vector(v):
+        min_v = np.min(v)
+        max_v = np.max(v)
+        if max_v == min_v:
+            return np.zeros_like(v)
+        return (v - min_v) / (max_v - min_v)
+
     for j in range(factor_mask.shape[1]):
         indices = np.arange(0, lower_ind)
         factor_mask[indices, j] = normalize_vector(indices) ** exp
 
     wx_filt = wx_og * factor_mask
-    rec = ssq.icwt(wx_filt, wavelet, scales)
-    rec_rescale = rec * np.std(x_subset) + np.mean(x_subset) #(rec / np.std(rec)) * np.std(x_subset) + np.mean(x_subset)
+    x_sweep = ssq.icwt(wx_filt, wavelet, scales)
 
-    return rec, wx_og, wx_filt, factor_mask
+    x_sweep = stats.zscore(x_sweep)
+    x_sweep *= np.std(x_subset)
 
+    x_sweep *= loc_env_if 
+    x_sweep += loc_mean_if
 
-#LIU DLM FUNCTIONS
+    corr_factor = np.mean(loc_mean_if) - ((x_subset_mean + np.mean(loc_mean_if)) / 2)
 
-class Prior:
-    def __init__(self, m, C, S, nu): 
-        self.m = m # mean of t-distribution 
-        self.C = C # scale matrix of t-distribution
-        self.S = S # precision ~ IG(nu/2,S*nu/2)
-        self.nu = nu # degree of freedom
+    x_sweep -= corr_factor
 
-class Model:
-    def __init__(self,Y,X,rseas,deltas):
-        self.Y = Y
-        self.X = X
-        self.rseas = rseas
-        dd = deltas
-        self.deltas = dd
-        ntrend = 2;nregn = X.shape[1]; pseas = len(rseas);nseas = pseas*2;
-        m = np.zeros([ntrend+nregn+nseas,1])
-        C = scipy.linalg.block_diag(1*np.eye(ntrend),1*np.eye(nregn),1*np.eye(nseas))
-        S = np.power(0.2,2); nu = ntrend+nregn+pseas;
-        pr = Prior(m,C,S,nu)
-        self.prior = pr
+    x_sweep[na_ind] = np.nan
 
+    return x_sweep, wx_og, wx_filt, factor_mask
 
-def forwardFilteringM(Model, fs):
-    # All the parameters estimated here correspond Eqs. 13-16 and the related ones in the Supplementary Information of Liu et al. (2019)
-    # notation in the code -> notation in Liu et al., 2019: 
-    # m -> m_t; C -> C_t^{**}; nu -> n_t; 
-    # a -> a_t; R -> R_t^{**}; F -> F_t; e -> e_t; y -> y_t; Q -> q_t^{**}; f -> f_t; S -> s_t = d_t/n_t
+def plot_landscape(FF_sweep, warmup, dates, plot_params, output_path=None):
+    """
+    Generate a 3D landscape plot showing the system trajectory over a
+    potential energy surface.
+
+    Args:
+        FF_sweep (dict): Dictionary with keys 'sm' and 'sC' containing state
+            means and covariances.
+        warmup (int): Number of timesteps to exclude from the beginning.
+        dates (pd.Series): Timestamps corresponding to the state estimates.
+        plot_params (list): Plotting parameters, site_name, label_offset_csv, [x1,y1][x2,y2] minima locations.
+        file_name (str): Output filename for the saved image.
+
+    Returns:
+        None. Saves a plotly figure as a png file.
+    """
+
+    camera_distance = 1.75
+    rotation_degree = 145
+    rotation_rad = np.radians(rotation_degree)
+
+    # Camera position (rotating around Z-axis)
+    eye_x = np.sin(rotation_rad) * camera_distance  # Rotates around Z-axis
+    eye_y = np.cos(rotation_rad) * camera_distance
+    eye_z = 1.28  # Keeping z fixed
+
+    # Light position (rotating around Z-axis)
+    n = 5
+
+    potential, X, Y, pdf, local_mean, ar1_resilience = calculate_landscape(
+        FF_sweep['sm'], 
+        FF_sweep['sC'], 
+        0, 
+        2, 
+        warmup
+        )
     
-    Y = Model.Y
-    X = Model.X
-    rseas = Model.rseas
-    delta = Model.deltas
-    Prior = Model.prior
-    period = 365.25/fs
-    deltrend = delta[0];delregn = delta[1];delseas = delta[2];delvar = delta[3]
-    Ftrend = np.array([[1],[0]]);ntrend = len(Ftrend); Gtrend = np.array([[1,1],[0,1]]);itrend = np.arange(0,ntrend)
-    nregn = X.shape[1];Fregn = np.zeros([nregn,1]);Gregn=np.eye(nregn);iregn = np.arange(ntrend,ntrend+nregn)
-    pseas = len(rseas);nseas = pseas*2;iseas = np.arange(ntrend+nregn,ntrend+nregn+nseas)
-    Fseas = np.tile([[1],[0]],[pseas,1]);Gseas = np.zeros([nseas,nseas]);
-    for j in range(pseas):
-        c = np.cos(2*np.pi*rseas[j]/period);
-        s = np.sin(2*np.pi*rseas[j]/period);
-        i = np.arange(2*j,2*(j+1))
-        Gseas[np.reshape(i,[2,1]),i] = [[c,s],[-s,c]]
-    F = np.concatenate((Ftrend,Fregn,Fseas),axis=0)
-    G = scipy.linalg.block_diag(Gtrend,Gregn,Gseas) 
-    m = Prior.m; C = Prior.C; S = Prior.S; nu = Prior.nu
+    dates_clip = dates[warmup: ]
 
-    T = len(Y)
-    sm = np.zeros(m.shape)
-    sC = np.zeros([C.shape[0],C.shape[1],1])
-    sS = np.zeros(1)
-    snu = np.zeros(1)
-    slik = np.zeros(1)
-    for t in range(T):
-        a = np.dot(G,m)
-        R = np.dot(np.dot(G,C),np.transpose(G))
-        R[np.reshape(itrend,[-1,1]),itrend] = R[np.reshape(itrend,[-1,1]),itrend]/deltrend
-        R[np.reshape(iregn,[-1,1]),iregn] = R[np.reshape(iregn,[-1,1]),iregn]/delregn
-        R[np.reshape(iseas,[-1,1]),iseas] = R[np.reshape(iseas,[-1,1]),iseas]/delseas
-        nu = delvar*nu
-        F[iregn,0] = X[t,]
+    potential = np.sqrt(potential - np.nanmin(potential) + 1) - 1
+    potential = gaussian_filter(potential, sigma=3)
 
-        A = np.dot(R,F);Q = np.squeeze(np.dot(np.transpose(F),A)+S); A = A/Q; f = np.squeeze(np.dot(np.transpose(F),a))
-        y = Y[t]
+    # Subsample every nth timestep
+    subsampled_local_mean = local_mean[::n]
+    subsampled_ar1_resilience = ar1_resilience[::n]
+    dates_clip = dates_clip[::n]
+
+    def moving_average(data, window_size):
+        if window_size % 2 == 0:
+            raise ValueError("Window size must be an odd number to ensure central averaging.")
+
+        half_window = window_size // 2
+        smoothed = np.array(data, dtype=float)  # Ensure floating point calculations
+        result = np.copy(smoothed)
+
+        for i in range(len(data)):
+            start = max(0, i - half_window)
+            end = min(len(data), i + half_window + 1)
+            result[i] = np.mean(smoothed[start:end])
+
+        return result
+
+    subsampled_local_mean = moving_average(
+        subsampled_local_mean,
+        window_size=31
+        )
+    subsampled_ar1_resilience = moving_average(
+        subsampled_ar1_resilience,
+        window_size=31
+        )
+
+    # Create a meshgrid for X, Y, and flatten it for interpolation
+    x_flat = X.ravel()
+    y_flat = Y.ravel()
+    z_flat = potential.ravel()
+
+    z_offset = 0.2
+
+    # Prepare static surface with proper shading, lighting, and aspect ratio
+    attr_surface = go.Surface(
+        z=potential,
+        x=X,
+        y=Y,
+        surfacecolor=potential,
+        colorscale="Spectral",
+        cmin=0.5,
+        cmax=3.8,
+        opacity=1,
+        lighting=dict(
+            ambient=0.4,    # surface
+            diffuse=0.6,    # surface
+            specular=0.3,   # surface
+            roughness=0.5,  # surface
+            fresnel=0.1,    # surface
+        ),
+        lightposition=dict(
+            x=3,
+            y=3,
+            z=1,
+        ),
+        contours=dict(
+            z=dict(
+                show=True,
+                start=0,
+                end=4,
+                size=0.2,
+                color="black",
+                width=2,
+            )
+        ),
+        showscale=False,  # No color bar
+        name="Potential Energy Surface",
+    )
+
+
+    # Define fixed axis ranges with margins
+    pad = 0.05
+    x_range_full = [X.min(), X.max()]
+    y_range_full = [Y.min(), Y.max()]
+    z_range_full = [potential.min(), potential.max() + z_offset]
+
+    x_margin = pad * (x_range_full[1] - x_range_full[0])
+    y_margin = pad * (y_range_full[1] - y_range_full[0])
+    z_margin = pad * (z_range_full[1] - z_range_full[0])
+
+    x_range_fixed = [x_range_full[0] - x_margin, x_range_full[1] + x_margin]
+    y_range_fixed = [y_range_full[0] - y_margin, y_range_full[1] + y_margin]
+    z_range_fixed = [z_range_full[0] - z_margin, z_range_full[1] + z_margin]
+
+    time_traj = {"x": [], "y": [], "z": []}
+
+    for j in range(len(subsampled_local_mean)):
+        x, y = subsampled_local_mean[j], subsampled_ar1_resilience[j]
+        z = griddata((x_flat, y_flat), z_flat, (x, y), method="linear")
         
-        if ~np.isnan(y):
-            e = y-f; ac = (nu+np.power(e,2)/Q)/(nu+1)
-            rQ = np.sqrt(Q)
-            mlik = tdstr.pdf(e/rQ,nu)/rQ
-            m = a+A*e; C = ac*(R-np.dot(A,np.transpose(A))*Q); nu = nu+1; S = ac*S; 
-            # About "S = ac*S" (using the notations in Liu et al. (2019)): 
-            # s_t = d_t/n_t = (d_{t-1}+e_t^2/(q_t^{**}/s_t))/n_t = s_{t-1} * (n_{t-1}+e_t^2/(q_t^{**})/n_t = ac * s_{t-1}
-        else:
-            m = a; C = R;
-            if t<T-1:
-                X[t+1,0] = f
-            mlik = np.nan
-        sm = np.concatenate((sm,m),axis=1)
-        sC = np.concatenate((sC,np.reshape(C,[C.shape[0],C.shape[1],1])),axis=2)
-        snu = np.concatenate((snu,[nu]),axis=0)
-        sS = np.concatenate((sS,[S]),axis=0)
-        slik = np.concatenate((slik,[mlik]),axis=0)  
-    return {'sm':sm, 'sC':sC ,'snu':snu,'slik':slik} 
+        if z is None:
+            z = potential.min()
 
-def computeAnormaly(CLM,AvgCLM,date0):
-    deltaT = timedelta(days=16)
-    anCLM = np.zeros([1,CLM.shape[1]])
-    for i in range(CLM.shape[0]):
-        st = date0+deltaT*(i); st = st.timetuple().tm_yday
-        et = date0+deltaT*(i+1); et = et.timetuple().tm_yday               
-        if et<st:
-            window = np.concatenate((np.arange(st,365),np.arange(0,et)))
-        else:
-            window = np.arange(st,et)
-        window[window==365] = 0  # leap year
-        anCLM = np.concatenate((anCLM,np.reshape(CLM[i,:]- np.mean(AvgCLM[window,:],axis = 0),[1,CLM.shape[1]])),axis=0)
-    return anCLM[1:,:]
-
-def Index_low(nn,date0,percentile):
-    intervel = 16
-    date0_num = date0.toordinal()
-    dd = np.arange(date0,date0+timedelta(days=intervel)*len(nn),timedelta(days=intervel))
-    dd_num = np.arange(date0_num,date0_num+intervel*(len(nn)),intervel)
-    idq = [i for i in range(len(nn)) if np.isfinite(nn[i])] 
-    tt1_num = np.arange(dd_num[idq[0]],dd_num[idq[-1]],1)
-    f_itp = interp1d(dd_num[idq], nn[idq],kind = 'linear')
-    nn_itp = f_itp(tt1_num)
-    
-    yday = np.array([date.fromordinal(tt1_num[i]).timetuple().tm_yday for i in range(len(tt1_num))])
-    
-    ndvi_mean = np.array([np.mean(nn_itp[yday==i]) for i in range(1,366)])
-    ndvi_std = np.array([np.std(nn_itp[yday==i]) for i in range(1,366)])
-    if len(ndvi_mean)==365:
-        ndvi_mean = np.concatenate((ndvi_mean,[ndvi_mean[-1]]),axis = 0)
-        ndvi_std = np.concatenate((ndvi_std,[ndvi_std[-1]]),axis = 0)
-    
-    tt2 = np.arange(dd[0],dd[-1],timedelta(days=1))
-    tt2_num = np.arange(dd_num[0],dd_num[-1],1)
-    yday2 = np.array([date.fromordinal(tt2_num[i]).timetuple().tm_yday for i in range(len(tt2_num))])
-    nv = norm.ppf(1-(1-percentile)/2)
-    lowboundary = np.array([ndvi_mean[yday2[i]-1]-nv*ndvi_std[yday2[i]-1] for i in range(len(tt2))])
-    
-    index_low = [i for i in range(len(dd)) if (~np.isnan(nn[i])) and (nn[i]<lowboundary[tt2_num==dd_num[i]])] 
-    return index_low
-
-def PlotEWS(N,date0,sm,sC,snu):
-    # thresholds for identification of abnormally high autocorrelation (EWS)  
-    quantile1 = 0.90
-    quantile2 = 0.70
-    
-    steps = [date0+relativedelta(days=16*i) for i in range(len(N))]
-    lown = Index_low(N,date0,0.8)
-    lown_continuous = []
-    for i in range(len(lown)):
-        tile = [j for j in lown if (j<=lown[i] and j>=lown[i]-5)] 
-        if len(tile)>2: 
-            #NDVI being abnormally low fro more than half of the time within 3 mon
-            lown_continuous = np.concatenate([lown_continuous,[lown[i]]])
-            lown_continuous = np.array(lown_continuous).astype(int)
-    tmp = np.array([steps[i] for i in lown_continuous])
-    diebackdate = tmp[0]
-    
-    steps = np.array(steps)
-    
-    xpos = datetime(1996,1,1)
-    xtick = [datetime(2000,1,1)+relativedelta(years=2*i) for i in range(0,9)]
-    
-    plt.figure(figsize=(7, 8))
-    ax1 = plt.subplot(211)
-    
-    xlim = [datetime(1999,1,1),datetime(2016,7,1)]
-    ylim = [0.3,0.85]
-    ax1.plot(steps,N,'o-k',markersize=5,label='NDVI')
-    ax1.plot(steps[lown_continuous],N[lown_continuous],'or',label='ALN')
-    ax1.axvspan(datetime(2007,1,1), datetime(2010,1,1), color='brown', alpha=0.1, lw=0)
-    ax1.axvspan(datetime(2011,1,1), datetime(2016,1,1), color='brown', alpha=0.1, lw=0)
-    
-    xtick = [datetime(2000,1,1)+relativedelta(years=2*i) for i in range(0,9)]
-    ax1.set_xticks(xtick,('00','02','04','06','08','10','12','14','16'))
-    ax1.set_ylim(ylim)
-    ax1.set_xlim(xlim)
-    ax1.set_ylabel('NDVI')
-    ax1.legend(loc = 'lower left',ncol=2)
-    ax1.text(xpos, 0.82, '(a)',fontsize=20)
-    ax1.set_xticks(xtick)
-    plt.setp(ax1.get_xticklabels(), visible=False)
-    
-    warmup = 47
-    bd = list(map(lambda m,C,nu: m+np.sqrt(C)*tdstr.ppf(quantile1,nu),sm,sC,snu))
-    bd2 = list(map(lambda m,C,nu: m+np.sqrt(C)*tdstr.ppf(quantile2,nu),sm,sC,snu))
-    
-    mbd = np.median(bd2[warmup:])
-    ews = np.array([i for i,im in enumerate(sm) if im >mbd])
-    ews = ews[ews>warmup]
-    ews_continuous = []
-    window = int(90/16) # three months
-    
-    for i in range(len(ews)):
-        tile = [j for j in ews if (j<=ews[i] and j>=ews[i]-window)]
-        if len(tile)>window-1:
-            ews_continuous = np.concatenate([ews_continuous,[ews[i]]])
-    ews_continuous = np.array(ews_continuous).astype(int)
-    tmp = steps[ews_continuous]
-    ewsdate = tmp[tmp>datetime(2012,7,15)][0]
-    mortdate = datetime(2015,7,15)
-    arrowprops=dict(facecolor='black', shrink=0.05,width=1,headwidth=10)
-    ax2 = plt.subplot(212)
-    ylim = [-0.5,0.7]
-    ax2.plot(steps[1:], sm[1:], lw=2, label='mean')
-    ax2.fill_between(steps, 2*sm-bd, bd, facecolor='0.7',label=str(int(quantile1*100))+'% range')
-    ax2.fill_between(steps, 2*sm-bd2, bd2, facecolor='0.5',label=str(int(quantile2*100))+'% range')
-    ax2.plot([steps[warmup],steps[-1]],[mbd,mbd],'--',color='0.4')
-    ax2.plot(steps[ews_continuous],sm[ews_continuous],'^r',markersize=3,label='EWS')
-    ax2.axvspan(datetime(2007,1,1), datetime(2010,1,1), color='brown', alpha=0.1, lw=0)
-    ax2.axvspan(datetime(2011,1,1), datetime(2016,1,1), color='brown', alpha=0.1, lw=0)
-    ax2.set_xlim(xlim)
-    ax2.set_xticks(xtick)
-    ax2.set_xticklabels(('00','02','04','06','08','10','12','14','16'))
-    ax2.set_ylim(ylim)
-    ax2.set_ylabel('Autocorrelation')
-    ax2.set_xlabel('Year')
-    yend = -0.28
-    ft = 14
-    hshift = relativedelta(months=3)
-    ax2.text(mortdate-hshift, 0.05, 'mortality',rotation='vertical',fontsize=ft)
-    ax2.text(diebackdate-hshift, 0.00, 'dieback',rotation='vertical',fontsize=ft)
-    ax2.text(ewsdate-hshift, -0.12, 'EWS',rotation='vertical',fontsize=ft)
-    
-    ax2.annotate('', xy=(mortdate, ylim[0]), 
-                xytext=(mortdate, yend),arrowprops=arrowprops)
-    ax2.annotate('', xy=(diebackdate, ylim[0]), 
-                xytext=(diebackdate, yend),arrowprops=arrowprops)
-    ax2.annotate('', xy=(ewsdate, ylim[0]), 
-                xytext=(ewsdate, yend),arrowprops=arrowprops)
-    ax2.legend(loc=9,ncol=2)
-    ax2.text(xpos, 0.63, '(b)',fontsize=20)
-
-def calDrift(ts,window):
-    qv = (np.nanmax(ts)-np.nanmin(ts))/20
-    delta = (np.nanmax(ts)-np.nanmin(ts))/10
-    trd_diffusion = (np.nanmax(ts)-np.nanmin(ts))/20
-    drift = np.zeros([len(ts)-window-1,1])
-    
-    for i in range(drift.shape[0]):
-        subn = ts[i:i+window]
-        DX = subn[1:]-subn[:-1]
-        X1 = subn[:-1]
-        xq = np.arange(np.nanmin(ts)-0.1*abs(np.nanmin(ts)),np.nanmax(ts)+0.1*abs(np.nanmax(ts)),qv)
-        mx = np.zeros(xq.shape)+np.nan
-        mx2 = np.zeros(xq.shape)+np.nan
-        for j in range(len(xq)):
-            tmp = DX[np.abs(X1-xq[j])<delta]
-            if len(tmp)>0:
-                mx[j] = np.nanmedian(tmp)
-                mx2[j] = np.nanmedian(tmp**2)
-        idx = [j for j,x in enumerate(mx2) if x<trd_diffusion]
-        idx = [j for j in idx if np.isfinite(mx[j])] # remove nan
-        if np.size(idx):            
-            drift[i] = 1+np.polyfit(xq[idx],mx[idx],1)[0] # slope of <D(x)_1> v.s. x
-        else:
-            drift[i] = 0
-    return drift
-
-def calEmprAC(nn,window):
-    empr_ac = np.zeros([len(nn)-window-1,1])
-    for i in range(len(empr_ac)):
-        t1 = nn[i:i+window]
-        t2 = nn[i+1:i+window+1]
-        idx = [j for j in range(len(t1)) if np.isfinite(t1[j]+t2[j])]
-        if np.size(idx):
-            empr_ac[i] = np.corrcoef(t1[idx],t2[idx])[0,1]
-        else:
-            empr_ac[i] = 0
-    return empr_ac
-
-def calEmprVar(nn,window):
-    return np.asarray([np.nanstd(nn[i:i+window]) for i in range(len(nn)-window)])
+        time_traj["x"].append(x)
+        time_traj["y"].append(y)
+        time_traj["z"].append(z)  
 
 
-def plotThFig(FF,X,meanX):
-    warmup = int(24*1.5)
-    quantile = 0.90
-    vid = 2
+    path_trace = go.Scatter3d(
+        x=time_traj["x"],  
+        y=time_traj["y"],
+        z=[z + 0.2 for z in time_traj["z"]],
+        mode="lines",
+        line=dict(color="red", width=7), 
+        name="Smoothed trajectory",
+    )
 
-    sm = FF.get('sm')[vid,:]
-    sC = np.sqrt(FF.get('sC')[vid,vid,:]) # std
-    snu = FF.get('snu')
-    bd = list(map(lambda m,C,nu: m+C*tdstr.ppf(quantile,nu),
-                      sm,sC,snu))
-    mbd = np.median(bd[warmup:])
-    ews = np.array([i for i,im in enumerate(sm) if im >mbd])
-    ews = ews[ews>warmup]
-    ews_continuous = []
-    for i in range(len(ews)): # if ews lasts > 3 mon
-        tile = [j for j in ews if (j<=ews[i] and j>=ews[i]-5)]
-        if len(tile)>4:
-            ews_continuous = np.concatenate([ews_continuous,[ews[i]]])
-    ews_continuous = np.array(ews_continuous).astype(int)
+    start_x = time_traj["x"][0]
+    start_y = time_traj["y"][0]
+    start_z = time_traj["z"][0] + 0.2
 
-    xpos = -220
-    xlim = [-0.05*len(X),len(X)*1.05]
-    plt.figure(figsize=(8, 8))
-    ax1 = plt.subplot(311)
-    ax1.plot(X+meanX,'-k')
-    ax1.set_ylim([0.05,1.05])
-    ax1.set_xlim(xlim)
-    ax1.set_ylabel('yt')
-    ax1.text(xpos, 0.95, '(a)',fontsize=20)
-    
-    steps = np.arange(len(sm))
-    ax2 = plt.subplot(3,1,2)
-    ax2.plot(steps,sm,lw=2, label='mean')
-    ax2.fill_between(steps,2*sm-bd, bd, facecolor='0.7',label=str(int(quantile*100))+'% range')
-    ax2.plot([warmup,len(sm)],[mbd,mbd],'--',color='0.4')
-    ax2.plot(steps[ews_continuous],sm[ews_continuous],'^r',markersize=3,label='EWS')
-    
-    ax2.set_ylim([-0.2,1.2])
-    ax2.set_xlim(xlim)
-    ax2.set_ylabel('DLM autocorr')
-    ax2.legend(loc=9,ncol=3)
-    ax2.text(xpos, 1.1, '(b)',fontsize=20)
-    
-    window = 50
-    emprAc = calEmprAC(X,window)
-    emprVar = calEmprVar(X,window)
-    Drift = calDrift(X,window)
-    
-    ax3 = plt.subplot(3,1,3)
-    ax4 = ax3.twinx()
-    nv = norm.ppf(0.8)
-    l1 = ax3.plot(steps[window+1:],emprAc,label='autocorr')
-    ax3.plot([steps[window],steps[-1]],np.nanmean(emprAc)+nv*np.nanstd(emprAc)*np.array([1,1]),'--',color=l1[0].get_color())
-    l2 = ax3.plot(steps[window+1:],Drift,label='drift')
-    ax3.plot([steps[window],steps[-1]],np.nanmean(Drift)+nv*np.nanstd(Drift)*np.array([1,1]),'--',color=l2[0].get_color())
-    
-    ax3.set_xlabel('Time step')
-    ax3.set_ylabel('autocorr/drift')
-    ax3.set_xlim(xlim)
-    ax3.set_ylim([-0.3,1.05])
-    l3 = ax4.plot(steps[window:],emprVar,'-g',label='std')
-    ax4.plot([steps[window],steps[-1]],np.nanmean(emprVar)+nv*np.nanstd(emprVar)*np.array([1,1]),'--',color=l3[0].get_color())
-    ax4.set_ylabel('std')
-    ax4.set_ylim([0.03,0.22])
-    
-    leg3 = ax3.legend(bbox_to_anchor=(0.48, -0.28),ncol=2,)
-    leg4 = ax4.legend(bbox_to_anchor=(0.7, -0.28))
-    leg3.get_frame().set_linewidth(0.0)
-    leg4.get_frame().set_linewidth(0.0)
-    ax3.text(xpos, 0.95, '(c)',fontsize=20)
-    
-def plotThFig2(FF,X,meanX):
-    warmup = int(24*1.5)
-    quantile = 0.90
 
-    xpos = -220
-    xlim = [-0.05*len(X),len(X)*1.05]
-    plt.figure(figsize=(8, 8))
-    ax1 = plt.subplot(311)
-    ax1.plot(X+meanX,'-k')
-    ax1.set_ylim([0.05,1.05])
-    ax1.set_xlim(xlim)
-    ax1.set_ylabel('yt')
-    ax1.text(xpos, 0.95, '(a)',fontsize=20)
+    start_marker = go.Scatter3d(
+        x=[start_x],
+        y=[start_y],
+        z=[start_z],
+        mode="markers",
+        marker=dict(
+            symbol="square",  
+            size=6,  
+            color="red",  
+            opacity=1
+        ),
+        name="Start Point"
+    )
+
+    frame_fig = go.Figure(data=[attr_surface, path_trace, start_marker])
+
+   
+    frame_fig.update_layout(
+        scene=dict(
+            xaxis=dict(
+                title="NDVI Anomaly", 
+                range=x_range_fixed,
+                tickvals = np.round(np.arange(-1, 1, 0.05), 2),
+                ticktext = np.round(np.arange(-1, 1, 0.05), 2),
+                showspikes=False,
+                showbackground=False,  
+                zeroline=True,
+                zerolinecolor="black",
+                showline=True,
+                linecolor="black",
+                linewidth=2,
+                tickcolor="black",
+                tickwidth=2,
+                gridcolor="lightgray"
+
+            ),
+            yaxis=dict(
+                title="System speed (-AC1)", 
+                tickmode = "array",
+                tickvals = np.round(np.arange(-1, 1.1, 0.1), 2),
+                ticktext = -np.round(np.arange(-1, 1.1, 0.1), 2),
+                range=y_range_fixed,
+                showspikes=False,
+                showbackground=False,
+                zeroline=True,
+                zerolinecolor="black",
+                showline=True,
+                linecolor="black",
+                linewidth=2,
+                tickcolor="black",
+                tickwidth=2,
+                gridcolor="lightgray"
+
+            ),
+            zaxis=dict(
+                title="Potential", 
+                range=z_range_fixed,
+                showspikes=False,
+                showbackground=False,
+                zeroline=True,
+                zerolinecolor="black",
+                showline=True,
+                linecolor="black",
+                linewidth=2,
+                tickcolor="black",
+                tickwidth=2,
+                gridcolor="lightgray"
+
+            ),
+            aspectmode="manual", 
+            aspectratio=dict(x=1, y=1, z=0.5),
+            camera=dict(
+                eye=dict(x=-eye_x, y=eye_y, z=eye_z),  
+                up=dict(x=1, y=0, z=1),  
+                center=dict(x=0, y=0, z=0),  
+            ),
+        ),
+        margin=dict(l=0, r=0, t=0, b=0), 
+        paper_bgcolor="white",  
+        plot_bgcolor="white", 
+    )
+
+    if isinstance(plot_params.iloc[2], str) and plot_params.iloc[2].strip():  
+            time_traj_points = np.column_stack(
+                (time_traj["x"], time_traj["y"], time_traj["z"])
+                )
+            coord_string = plot_params.iloc[2]  
+            minima_points = np.array(
+                [ast.literal_eval(f"[{x}]") for x in coord_string.strip("][").split("][")]
+                )
+            grid_coords = np.column_stack((X.ravel(), Y.ravel()))
+            grid_distances = cdist(minima_points, grid_coords)
+            closest_grid_indices = np.argmin(grid_distances, axis=1)
+            closest_grid_z = potential.ravel()[closest_grid_indices]
+            matched_minima = np.column_stack((minima_points, closest_grid_z))
+            traj_points_xy = time_traj_points[:, :2] 
+            distances = cdist(minima_points, traj_points_xy)
+            closest_traj_indices = np.argmin(distances, axis=1)
+            closest_traj_x = np.array(time_traj["x"])[closest_traj_indices]
+            closest_traj_y = np.array(time_traj["y"])[closest_traj_indices]
+            closest_traj_z = np.array(time_traj["z"])[closest_traj_indices]
+            closest_dates = [dates_clip.iloc[j] for j in closest_traj_indices]
+
+            results = [
+                {
+                    "minima": {"x": minima[0], "y": minima[1], "z": minima[2]},
+                    "closest_traj": {
+                        "x": closest_traj_x[i], 
+                        "y": closest_traj_y[i],
+                        "z": closest_traj_z[i]},
+                    "date": closest_dates[i].strftime('%d-%m-%Y'),
+                }
+                for i, minima in enumerate(matched_minima)
+            ]
+
+
+            z_max_offset = potential.max() + 0.1  
+
+            dogleg_traces = []
+            annotations = []
+
+            offset_list = list(map(float, plot_params.iloc[1].split(",")))
+
+            for j, result in enumerate(results):
+                # Minima coordinates
+                minima_x = result["closest_traj"]["x"]
+                minima_y = result["closest_traj"]["y"]
+                minima_z = result["closest_traj"]["z"] + 0.2
+
+                # Vertical line endpoint
+                vert_x = minima_x
+                vert_y = minima_y
+                vert_z = z_max_offset
+
+                # Horizontal line endpoint
+                horiz_y = vert_y
+                horiz_z = vert_z
+
+                # Vertical line trace
+                vertical_trace = go.Scatter3d(
+                    x=[minima_x, vert_x],
+                    y=[minima_y, vert_y],
+                    z=[minima_z, vert_z],
+                    mode="lines",
+                    line=dict(color="black", width=3),
+                    showlegend=False,
+                    name=f"Vertical Line {j + 1}",
+                )
+                dogleg_traces.append(vertical_trace)
+
+                # Horizontal line trace
+                horizontal_trace = go.Scatter3d(
+                    x=[vert_x, vert_x + offset_list[j]],
+                    y=[vert_y, horiz_y],
+                    z=[vert_z, horiz_z],
+                    mode="lines",
+                    line=dict(color="black", width=3),
+                    showlegend=False,
+                    name=f"Horizontal Line {j + 1}",
+                )
+                dogleg_traces.append(horizontal_trace)
+
+                if offset_list[j] > 0:
+                    xanchor_j = "left"
+                else:
+                    xanchor_j = "right"
+
+                annotations.append(
+                    dict(
+                        x=vert_x + offset_list[j],
+                        y=horiz_y,
+                        z=horiz_z,
+                        text=result["date"],
+                        showarrow=False,  
+                        font=dict(size=17, color="black", family="Arial"),  
+                        xanchor=xanchor_j,  
+                        yanchor="middle",
+                        bgcolor="white",  
+                        opacity=0.8, 
+                    )
+                )
+
+            for trace in dogleg_traces:
+                frame_fig.add_trace(trace)
+
+            frame_fig.update_layout(
+                scene=dict(
+                    annotations=annotations,  
+                ),
+                margin=dict(l=0, r=0, t=0, b=0), 
+            )
+
+    frame_fig.update_layout(showlegend=False)
+    frame_fig.update_layout(
+        margin=dict(l=0, r=0, t=0, b=0)  
+    )
+
+    if output_path:
+        frame_fig.write_image(output_path, engine="kaleido", width=1080/1.5, height=960/1.5)
+    else:
+        return frame_fig
+
     
-    vid = 0
-    sm = FF.get('sm')[vid,:]
-    sC = np.sqrt(FF.get('sC')[vid,vid,:]) # std
-    snu = FF.get('snu')
-    bd = list(map(lambda m,C,nu: m+C*tdstr.ppf(quantile,nu),
-                      sm,sC,snu))
-    steps = np.arange(len(sm))
-    ax2 = plt.subplot(3,1,2)
-    ax2.plot(steps,sm,lw=2, label='mean')
-    ax2.fill_between(steps,2*sm-bd, bd, facecolor='0.7',label=str(int(quantile*100))+'% range')
-    ax2.set_ylim([-0.22,0.22])
-    ax2.set_xlim(xlim)
-    ax2.set_ylabel('DLM local mean')
-    ax2.legend(loc=1,ncol=1)
-    ax2.text(xpos, 0.21, '(b)',fontsize=20)
+
+def plot_landscape_gif(FF_sweep, warmup, dates, plot_params):
+    """Generate a GIF showing system evolution on a 3D potential surface.
+
+    Args:
+        FF_sweep (dict): Dictionary with keys 'sm' and 'sC' containing state
+            means and covariances.
+        warmup (int): Number of timesteps to exclude from the beginning.
+        dates (pd.Series): Timestamps corresponding to the state estimates.
+        plot_params (list): Plotting parameters including animation labels.
+
+    Returns:
+        None. Saves a GIF animation to file.
+    """
+
+    camera_distance = 1.75
+    rotation_degree = 145
+    rotation_rad = np.radians(rotation_degree)
+
+    eye_x = np.sin(rotation_rad) * camera_distance  
+    eye_y = np.cos(rotation_rad) * camera_distance
+    eye_z = 1.28 
     
+    n = 5
+
+    potential, X, Y, pdf, local_mean, ar1_resilience = calculate_landscape(
+        FF_sweep['sm'], 
+        FF_sweep['sC'], 
+        0, 
+        2, 
+        warmup
+        )
+
+    potential = np.sqrt(potential - np.nanmin(potential) + 1) - 1
+    potential = gaussian_filter(potential, sigma=3)
+    dates_clip = dates[warmup: ]
+
+    subsampled_local_mean = local_mean[::n]
+    subsampled_ar1_resilience = ar1_resilience[::n]
+    dates_clip = dates_clip[::n]
+    dates_clip.reset_index(drop=True, inplace=True)
+
+    def moving_average(data, window_size):
+        if window_size % 2 == 0:
+            raise ValueError(
+                "Window size must be an odd number to ensure central averaging."
+                )
+
+        half_window = window_size // 2
+        smoothed = np.array(data, dtype=float)  
+        result = np.copy(smoothed)
+
+        for i in range(len(data)):
+            start = max(0, i - half_window)
+            end = min(len(data), i + half_window + 1)
+            result[i] = np.mean(smoothed[start:end])
+
+        return result
+
+    subsampled_local_mean = moving_average(
+        subsampled_local_mean,
+        window_size=31
+        )
+    subsampled_ar1_resilience = moving_average(
+        subsampled_ar1_resilience,
+        window_size=31
+        )
+
+    x_flat = X.ravel()
+    y_flat = Y.ravel()
+    z_flat = potential.ravel()
+
+    z_offset = 0.2
+
+    attr_surface = go.Surface(
+        z=potential,
+        x=X,
+        y=Y,
+        surfacecolor=potential,
+        colorscale="Spectral",
+        cmin=0.8,
+        cmax=3.8,
+        opacity=1,
+        lighting=dict(
+            ambient=0.4,    
+            diffuse=0.6,    
+            specular=0.3,   
+            roughness=0.5,  
+            fresnel=0.1,    
+        ),
+        lightposition=dict(
+            x=3,
+            y=3,
+            z=1,
+        ),
+        contours=dict(
+            z=dict(
+                show=True,
+                start=0,
+                end=4,
+                size=0.2,
+                color="black",
+                width=2,
+            )
+        ),
+        showscale=False,  
+        name="Potential Energy Surface",
+    )
+
+
+    pad = 0.05
+    x_range_full = [X.min(), X.max()]
+    y_range_full = [Y.min(), Y.max()]
+    z_range_full = [potential.min(), potential.max() + z_offset]
+
+    x_margin = pad * (x_range_full[1] - x_range_full[0])
+    y_margin = pad * (y_range_full[1] - y_range_full[0])
+    z_margin = pad * (z_range_full[1] - z_range_full[0])
+
+    x_range_fixed = [x_range_full[0] - x_margin, x_range_full[1] + x_margin]
+    y_range_fixed = [y_range_full[0] - y_margin, y_range_full[1] + y_margin]
+    z_range_fixed = [z_range_full[0] - z_margin, z_range_full[1] + z_margin]
+
+    axis_limits = (x_range_fixed, y_range_fixed, z_range_fixed)
+    aspect_ratio = (1, 1, 0.5)  
+
+
+    time_traj = {"x": [], "y": [], "z": []}
+
+
+    for j in range(len(subsampled_local_mean)):
+        x, y = subsampled_local_mean[j], subsampled_ar1_resilience[j]
+        z = griddata((x_flat, y_flat), z_flat, (x, y), method="linear")
+        
+
+        if z is None:
+            z = potential.min()
+
+        time_traj["x"].append(x)
+        time_traj["y"].append(y)
+        time_traj["z"].append(z + 0.3)  
+
+
+    dx = np.diff(time_traj["x"])
+    dy = np.diff(time_traj["y"])
+    dz = np.diff(time_traj["z"])
+    norms = np.sqrt(dx**2 + dy**2 + dz**2)
+    dx /= norms  # Normalize
+    dy /= norms
+    dz /= norms
+
+    # Sample at regular intervals (e.g., every 5 points)
+    indices = np.arange(0, len(dx), 182)
+
+    # Generate Sphere
+    phi, theta = np.linspace(0, np.pi, 20), np.linspace(0, 2 * np.pi, 20)
+    phi, theta = np.meshgrid(phi, theta)
+    sphere_x_base = np.sin(phi) * np.cos(theta)
+    sphere_y_base = np.sin(phi) * np.sin(theta)
+    sphere_z_base = np.cos(phi)
+    radius_percentage = 0.05  # Ball diameter as 5% of axis limits
+
+    def update_sphere_scaled(center, radius_percentage, axis_limits, aspect_ratio):
+        """Generate a sphere scaled according to axis limits and aspect ratio."""
+        x_range, y_range, z_range = axis_limits
+        x_aspect, y_aspect, z_aspect = aspect_ratio
+
+        # Scale the radius based on axis limits and aspect ratio
+        x_scale = (x_range[1] - x_range[0]) * radius_percentage / x_aspect
+        y_scale = (y_range[1] - y_range[0]) * radius_percentage / y_aspect
+        z_scale = (z_range[1] - z_range[0]) * radius_percentage / z_aspect
+
+        x = center[0] + x_scale * sphere_x_base
+        y = center[1] + y_scale * sphere_y_base
+        z = center[2] + z_scale * sphere_z_base
+        return x, y, z
+
+    # Parallelize frame rendering
+    def render_frame(i):
+        x, y = subsampled_local_mean[i], subsampled_ar1_resilience[i]
+        z = griddata((x_flat, y_flat), z_flat, (x, y), method="linear")
+        
+        # Handle interpolation failures
+        if z is None:
+            z = potential.min()
+
+        # Path as a dotted red line slightly above the surface
+        path_trace = go.Scatter3d(
+            x=time_traj["x"][:i + 1],  # Use only the path up to the current frame
+            y=time_traj["y"][:i + 1],
+            z=time_traj["z"][:i + 1],
+            mode="lines",
+            line=dict(color="red", width=15),  # Dotted red line
+            name="Path",
+        )
+
+        sphere_x, sphere_y, sphere_z = update_sphere_scaled([x, y, z + z_offset], radius_percentage, axis_limits, aspect_ratio)
+        ball_trace = go.Surface(
+            x=sphere_x,
+            y=sphere_y,
+            z=sphere_z,
+            surfacecolor=np.zeros_like(sphere_x),  
+            colorscale=[[0, "red"], [1, "red"]], 
+            showscale=False, 
+            lighting=dict(
+                ambient=0.7,
+                diffuse=0.2,
+                specular=0.8,
+                roughness=0.5,
+                fresnel=0.2,
+            ),
+            lightposition=dict(
+                x=3,
+                y=3,
+                z=1,
+            ),
+            opacity=1,
+            name="Ball",
+        )
+
+        # Create figure for each frame
+        frame_fig = go.Figure(data=[attr_surface, ball_trace, path_trace])
+
+        date_str = dates_clip[i].strftime("%d/%m/%Y")
+
+        # Update layout with consistent camera, aspect ratio, and formatting
+        frame_fig.update_layout(
+            scene=dict(
+                xaxis=dict(
+                    title="NDVI Anomaly",  # No title
+                    range=x_range_fixed,
+                    showspikes=False,
+                    showbackground=False,  # Remove background
+                    zeroline=True,
+                    zerolinecolor="black",
+                    showline=True,
+                    linecolor="black",
+                    linewidth=2,
+                    tickcolor="black",
+                    tickwidth=2,
+                    gridcolor="lightgray"
+                ),
+                yaxis=dict(
+                    title="System speed (-AC1)",  # No title
+                    tickmode = "array",
+                    tickvals = np.round(np.arange(-1, 1.1, 0.1), 2),
+                    ticktext = -np.round(np.arange(-1, 1.1, 0.1), 2),
+                    range=y_range_fixed,
+                    showspikes=False,
+                    showbackground=False,
+                    zeroline=True,
+                    zerolinecolor="black",
+                    showline=True,
+                    linecolor="black",
+                    linewidth=2,
+                    tickcolor="black",
+                    tickwidth=2,
+                    gridcolor="lightgray"
+                ),
+                zaxis=dict(
+                    title="Potential",  # No title
+                    range=z_range_fixed,
+                    showspikes=False,
+                    showbackground=False,
+                    zeroline=True,
+                    zerolinecolor="black",
+                    showline=True,
+                    linecolor="black",
+                    linewidth=2,
+                    tickcolor="black",
+                    tickwidth=2,
+                    gridcolor="lightgray",
+                ),
+                aspectmode="manual",  # Maintain the aspect ratio
+                aspectratio=dict(x=1, y=1, z=0.5),
+                camera=dict(
+                    eye=dict(x=-eye_x, y=eye_y, z=eye_z),  # Camera position
+                    up=dict(x=1, y=0, z=1),  # "Up" direction
+                    center=dict(x=0, y=0, z=0),  # Center of the view
+                ),
+            ),
+            margin=dict(l=0, r=0, t=0, b=0),  # Remove margins
+            paper_bgcolor="white",  # White background
+            plot_bgcolor="white",  # White grid
+            annotations=[
+            go.layout.Annotation(
+                text=date_str,
+                x=0.02,       # a small offset from the left
+                y=0.02,       # near the top
+                xref="paper", 
+                yref="paper",
+                showarrow=False,
+                font=dict(size=25, color="black")
+            )
+            ],
+        )   
+
+        # Save frame
+        frame_path = os.path.join(frames_dir, f"frame_{i:04d}.png")
+        frame_fig.write_image(frame_path, engine="kaleido", width=1080, height=960)
+
     
-    vid = 2
-    sm = FF.get('sm')[vid,:]
-    sC = np.sqrt(FF.get('sC')[vid,vid,:]) # std
-    snu = FF.get('snu')
-    bd = list(map(lambda m,C,nu: m+C*tdstr.ppf(quantile,nu),
-                      sm,sC,snu))
-    mbd = np.median(bd[warmup:])
-    ews = np.array([i for i,im in enumerate(sm) if im >mbd])
-    ews = ews[ews>warmup]
-    ews_continuous = []
-    for i in range(len(ews)): # if ews lasts > 3 mon
-        tile = [j for j in ews if (j<=ews[i] and j>=ews[i]-5)]
-        if len(tile)>4:
-            ews_continuous = np.concatenate([ews_continuous,[ews[i]]])
-    ews_continuous = np.array(ews_continuous).astype(int)
-    
-    ax3 = plt.subplot(3,1,3)
-    ax3.plot(steps,sm,lw=2, label='mean')
-    ax3.fill_between(steps,2*sm-bd, bd, facecolor='0.7',label=str(int(quantile*100))+'% range')
-    ax3.plot([warmup,len(sm)],[mbd,mbd],'--',color='0.4')
-    ax3.plot(steps[ews_continuous],sm[ews_continuous],'^r',markersize=3,label='EWS')
-    ax3.set_ylim([-0.2,1.2])
-    ax3.set_xlim(xlim)
-    ax3.set_ylabel('DLM autocorr')
-    ax3.legend(loc=9,ncol=3)
-    ax3.text(xpos, 1.1, '(c)',fontsize=20)
-    ax3.set_xlabel('Time step')
-    
+    frames_dir = "C:/data/gif_frames"
+    os.makedirs(frames_dir, exist_ok=True)
+
+    Parallel(n_jobs=-1)(delayed(render_frame)(i) for i in range(len(subsampled_local_mean)))
+
+    output_gif = f"data_out/figs/gifs/surface_{plot_params.iloc[0]}.gif"
+    with imageio.get_writer(output_gif, mode="I", fps=12, loop=0, codec="png", quantizer="nq") as writer:
+        for frame_file in sorted(os.listdir(frames_dir)):
+            if frame_file.endswith(".png"):
+                writer.append_data(imageio.imread(os.path.join(frames_dir, frame_file)))
+
+    for frame_file in os.listdir(frames_dir):
+        os.remove(os.path.join(frames_dir, frame_file))
+
+    print(f"GIF saved at: {output_gif}")
 

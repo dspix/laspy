@@ -75,16 +75,19 @@ def run_dlm(N, anCLM, vid, fs, rseas, deltas, prior = None):
 
 def forwardFilteringM2(Model, fs):
     """
-    All the parameters estimated here correspond Eqs. 13-16 and the related ones in the Supplementary Information of Liu et al. (2019)
+    All the parameters estimated here correspond Eqs. 13-16 and the 
+    related ones in the Supplementary Information of Liu et al. (2019)
     notation in the code -> notation in Liu et al., 2019: 
     m -> m_t; C -> C_t^{**}; nu -> n_t; 
-    a -> a_t; R -> R_t^{**}; F -> F_t; e -> e_t; y -> y_t; Q -> q_t^{**}; f -> f_t; S -> s_t = d_t/n_t
+    a -> a_t; R -> R_t^{**}; F -> F_t; e -> e_t; y -> y_t; Q -> q_t^{**}; 
+    f -> f_t; S -> s_t = d_t/n_t
 
     forwardFilteringM from Liu et al (2019) was updated to the following:
 
-    Performs forward filtering for a dynamic linear model with seasonal structure.
-    Based on Liu et al. (2019), supporting trend, seasonal, and regressor components. 
-    Returns additional measures from the DLM and includes fs Arg for sample period.
+    Performs forward filtering for a dynamic linear model with 
+    seasonal structure. Based on Liu et al. (2019), supporting trend, 
+    seasonal, and regressor components. Returns additional measures from the 
+    DLM and includes fs Arg for sample period.
 
     Args:
         Model (Model): Model object containing Y, X, rseas, deltas, and priors.
@@ -196,7 +199,8 @@ def forwardFilteringM2(Model, fs):
         'explained_lag1':explained_lag1,
         'sS': sS,
         'sac': sac,
-        'se':se}
+        'se':se
+        }
 
 
 
