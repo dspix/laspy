@@ -459,7 +459,7 @@ def sweep_extract(x, signal_location_infil, wavelet, fs, l_period, exp):
 
     return x_sweep, wx_og, wx_filt, factor_mask
 
-def plot_landscape(FF_sweep, warmup, dates, plot_params, file_name):
+def plot_landscape(FF_sweep, warmup, dates, plot_params, output_path=None):
     """
     Generate a 3D landscape plot showing the system trajectory over a
     potential energy surface.
@@ -799,10 +799,12 @@ def plot_landscape(FF_sweep, warmup, dates, plot_params, file_name):
         margin=dict(l=0, r=0, t=0, b=0)  
     )
 
-    # Save frame
-    frames_dir = "data_out/figs/surfaces"
-    frame_path = os.path.join(frames_dir, file_name)
-    frame_fig.write_image(frame_path, engine="kaleido", width=1080/1.5, height=960/1.5)
+    if output_path:
+        frame_fig.write_image(output_path, engine="kaleido", width=1080/1.5, height=960/1.5)
+    else:
+        return frame_fig
+
+    
 
 def plot_landscape_gif(FF_sweep, warmup, dates, plot_params):
     """
