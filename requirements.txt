@@ -1,0 +1,13 @@
+earthengine-api>=0.1.341
+matplotlib>=3.8.0
+numpy>=1.23.0
+pandas>=1.5.0
+scipy>=1.9.0
+pyproj>=3.4.0
+cartopy>=0.21.1
+ssqueezepy>=0.6.0
+joblib>=1.2.0
+tqdm>=4.64.0
+statsmodels>=0.13.5
+plotly>=5.14.0
+imageio>=2.31.0
