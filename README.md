@@ -16,7 +16,7 @@ Clone this repository and add the `source` folder to the Python path to run the 
 
 ## Demo
 
-To run the example [example *Notebook*](https://github.com/dspix/laspy/blob/main/notebooks/sweep_landscapes_example.ipynb), first start a Jupyter server in the cloned repo (e.g. `$ jupyter notebook` or `$ jupyter lab`) and open the Notebook `sweep_landscapes_example.ipynb` using the browser interface.
+To run the example [example *Notebook*](https://github.com/dspix/laspy/blob/main/notebooks/sweep_landscapes_example.ipynb), first start a Jupyter server in the cloned repo (e.g. `$ jupyter notebook` or `$ jupyter lab`) and open the Notebook `sweep_landscapes_example.ipynb` using the browser interface. The code should run in less than a minute on a normal desktop/laptop computer.
 
 The example can be used to reconstruct all the analysis in the paper (link TODO).
 
