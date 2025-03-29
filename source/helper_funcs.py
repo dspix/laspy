@@ -1,3 +1,10 @@
+"""
+GNU GENERAL PUBLIC LICENSE
+Copyright (C) 2025 Will D. Rust, Marko Stojanovic, Daniel M. Simms
+
+https://github.com/dspix/laspy/blob/main/LICENSE
+"""
+
 import numpy as np
 from scipy.stats import t as tdstr
 from pycwt import wavelet, wct, cwt

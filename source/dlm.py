@@ -1,3 +1,13 @@
+"""
+GNU GENERAL PUBLIC LICENSE
+Copyright (C) 2025 Will D. Rust, Marko Stojanovic, Daniel M. Simms
+
+Modified from original code at by Liu et al. (2019):
+https://github.com/YanlanLiu/early-warning-signal-DLM
+
+https://github.com/dspix/laspy/blob/main/LICENSE
+"""
+
 from datetime import datetime
 import numpy as np
 import scipy.linalg
