@@ -1,6 +1,6 @@
 # Evidence for critical slowing down and transitions to alternative stable states in ecosystems
 
-Repository for the wavelet-based filtering of satellite time series signals (Selective Wavelet Extraction for the Estimation of Phenology, SWEEP) and visualization of *stability landscapes* for measuring ecosystem speed trajectories at UK reference sites (COSMOS-UK) that evidence dynamic ecological regimes.
+Repository for the wavelet-based filtering of satellite time series signals (Selective Wavelet Extraction for the Estimation of Phenology, SWEEP) and visualization of *stability landscapes* for measuring ecosystem change trajectories at UK reference sites (COSMOS-UK) that evidence dynamic ecological regimes.
 
 ## Installation
 
